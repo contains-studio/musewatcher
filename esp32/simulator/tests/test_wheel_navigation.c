@@ -73,5 +73,6 @@ int main(int argc, char **argv) {
     snap("14-cancelled-deferred-card");
     turn(1);expect("Latest card");click();snap("15-recall-cancelled-card");
     puts("PASS show_animation cancels deferred presentation but retains recall");
+    lv_deinit();
     return 0;
 }

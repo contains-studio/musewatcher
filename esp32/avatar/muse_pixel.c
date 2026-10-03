@@ -1,5 +1,10 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
+#ifndef _POSIX_C_SOURCE
+// Expose localtime_r when host previews compile with strict ISO C flags.
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "muse_pixel.h"
 #include "muse_ambient.h"
 
