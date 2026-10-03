@@ -31,11 +31,11 @@ int main(int argc, char **argv) {
     assert(argc == 2); output_dir = argv[1];
     setbuf(stdout,NULL);setenv("SDL_VIDEODRIVER","dummy",1);setenv("SDL_AUDIODRIVER","dummy",1);
     sim_time_reset();sim_services_reset();lv_init();muse_state_init();muse_state_set_power(&s_power);muse_board=sim_board_get();assert(muse_ui_start()==ESP_OK);
-    muse_state_set_mode(MUSE_MODE_IDLE);muse_state_set_caption("");step(800);snap("01-idle");
+    muse_state_set_mode(MUSE_MODE_IDLE);muse_state_set_caption("%s", "");step(800);snap("01-idle");
     muse_ui_reply_update("reply-1",reply);muse_state_set_mode(MUSE_MODE_SPEAKING);muse_state_set_caption("Start here.");step(200);
     turn(1);expect("Page 2/");snap("02-reading-page-2");
     muse_state_set_caption("Automatically advanced caption");step(500);expect("Page 2/");
-    muse_state_set_mode(MUSE_MODE_IDLE);muse_state_set_caption("");step(500);expect("Page 2/");
+    muse_state_set_mode(MUSE_MODE_IDLE);muse_state_set_caption("%s", "");step(500);expect("Page 2/");
     turn(-1);expect("Page 1/");expect("Start here.");snap("03-reading-page-1");
     click();assert(!has_text(lv_screen_active(),"Page 1/"));
     turn(1);expect("Last reply");snap("04-reply-browser");click();expect("Page 1/");click();
