@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -13,6 +14,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include <stdlib.h>
+#include <time.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -31,6 +35,9 @@
 #include "muse_ui.h"
 #include "muse_voice.h"
 #include "muse_wifi.h"
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+#include "muse_wardrobe_settings.h"
+#endif
 
 static const char *TAG = "muse";
 
@@ -43,6 +50,9 @@ static void on_setting(muse_setting_t what)
         break;
     case MUSE_SETTING_MIC_GAIN:
         muse_audio_set_mic_gain(muse_settings_mic_gain());
+        break;
+    case MUSE_SETTING_MIC:
+        muse_audio_set_mic_on(muse_settings_mic_on());
         break;
     case MUSE_SETTING_WIFI:
         muse_wifi_apply();
@@ -62,10 +72,18 @@ const muse_board_t *muse_board;
 
 void muse_app_run(const muse_board_t *board)
 {
+    setenv("TZ", CONFIG_MUSE_TIME_ZONE, 1);
+    tzset();
     muse_board = board;
     ESP_LOGI(TAG, "board: %s", board->name);
     ESP_ERROR_CHECK(board->init());
     ESP_ERROR_CHECK(muse_settings_init());
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    esp_err_t wardrobe_err = muse_wardrobe_settings_init();
+    if (wardrobe_err != ESP_OK) {
+        ESP_LOGW(TAG, "saved outfit unavailable: %s", esp_err_to_name(wardrobe_err));
+    }
+#endif
     muse_settings_set_listener(on_setting);
     muse_state_init();
     muse_battery_init();

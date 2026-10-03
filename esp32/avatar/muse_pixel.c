@@ -1,14 +1,79 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #include "muse_pixel.h"
+#include "muse_ambient.h"
+
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define W MUSE_PX_W
 #define H MUSE_PX_H
 #define TAU 6.2831853f
+
+/* Use the synchronized clock in the configured device timezone. An unset
+ * clock has no day-period effect; uptime must not look like a real date. */
+muse_ambient_period_t muse_ambient_period_at(time_t utc)
+{
+    if (utc < (time_t)1704067200) return MUSE_AMBIENT_UNSET;
+    struct tm date;
+    if (!localtime_r(&utc, &date)) return MUSE_AMBIENT_UNSET;
+    int hour = date.tm_hour;
+    return hour < 5 || hour >= 21 ? MUSE_AMBIENT_NIGHT :
+           hour < 11 ? MUSE_AMBIENT_MORNING :
+           hour < 17 ? MUSE_AMBIENT_DAY : MUSE_AMBIENT_EVENING;
+}
+
+static atomic_uint s_weather;
+static atomic_uint s_weather_expires;
+
+void muse_pixel_set_weather(muse_ambient_weather_t weather, uint32_t expires_at)
+{
+    if (weather < MUSE_WEATHER_UNKNOWN || weather > MUSE_WEATHER_WIND) {
+        weather = MUSE_WEATHER_UNKNOWN;
+    }
+    atomic_store(&s_weather_expires, expires_at);
+    atomic_store(&s_weather, (unsigned)weather);
+}
+
+#ifndef ESP_PLATFORM
+static bool s_preview;
+static muse_ambient_period_t s_preview_period;
+static muse_ambient_weather_t s_preview_weather;
+
+void muse_pixel_ambient_preview(muse_ambient_period_t period,
+                                muse_ambient_weather_t weather)
+{
+    s_preview = true;
+    s_preview_period = period;
+    s_preview_weather = weather;
+}
+#endif
+
+static void ambient_context(muse_ambient_period_t *period, muse_ambient_weather_t *weather)
+{
+#ifndef ESP_PLATFORM
+    if (s_preview) {
+        *period = s_preview_period;
+        *weather = s_preview_weather;
+        return;
+    }
+#endif
+    static time_t last_utc;
+    static muse_ambient_period_t cached;
+    time_t now = time(NULL);
+    if (now < last_utc || now - last_utc >= 15 || !last_utc) {
+        cached = muse_ambient_period_at(now);
+        last_utc = now;
+    }
+    *period = cached;
+    uint32_t expires = atomic_load(&s_weather_expires);
+    *weather = now >= 1704067200 && now < (time_t)expires ?
+        (muse_ambient_weather_t)atomic_load(&s_weather) : MUSE_WEATHER_UNKNOWN;
+}
 
 /* ---------------------------------------------------------------------------
  * Palette
@@ -65,6 +130,14 @@ static const scheme_t SCHEMES[MUSE_MODE_COUNT] = {
     [MUSE_MODE_SPEAKING]  = { { 0xeafff4, 0x9ff5cf, 0x3fd9a0, 0x1f9a7a }, 0x6ff0bf },
     [MUSE_MODE_ERROR]     = { { 0xffd6d6, 0xff6b6b, 0xc7304a, 0x6b1a3a }, 0xff5c5c },
     [MUSE_MODE_OFF]       = { { 0xd8d4ff, 0x8f86d9, 0x5a4fb0, 0x2e2870 }, 0x7c72d0 },
+};
+
+static const scheme_t AMBIENT_SCHEMES[] = {
+    [MUSE_AMBIENT_UNSET]   = { { 0xf4e8ff, 0xc7a4ff, 0x9a6bff, 0x5b3fd9 }, 0xa77dff },
+    [MUSE_AMBIENT_MORNING] = { { 0xfff4d9, 0xffd796, 0xe6a263, 0x9d6c47 }, 0xffc786 },
+    [MUSE_AMBIENT_DAY]     = { { 0xebfff6, 0xa7efdb, 0x66cbbb, 0x3d9295 }, 0x8ae3ca },
+    [MUSE_AMBIENT_EVENING] = { { 0xffe8d8, 0xe6a5a4, 0xb979a6, 0x744e91 }, 0xe5a8aa },
+    [MUSE_AMBIENT_NIGHT]   = { { 0xdde4ff, 0xa8b2e9, 0x747bc1, 0x454b85 }, 0x929eda },
 };
 
 /* Cream fur and a peach face. */
@@ -827,6 +900,90 @@ static void draw_alert(int x, int y)
     stamp(BANG, 6, x - 2, y, C_ACC, C_ACC);
 }
 
+/* Quiet, sparse scenery stays in the margins of the 64 px stage. It never
+ * replaces the familiar listening rings, thinking dots or error expression. */
+static void draw_sun(int x, int y, float t)
+{
+    static const char *const SUN[] = { ".###.", "#####", "##o##", "#####", ".###." };
+    stamp(SUN, 5, x - 2, y - 2, C_ACC, C_G0);
+    int ray = ((int)(t * 1.5f) & 1) ? 4 : 5;
+    px(x - ray, y, C_G1); px(x + ray, y, C_G1);
+    px(x, y - ray, C_G1); px(x, y + ray, C_G1);
+    px(x - 3, y - 3, C_AURA2); px(x + 3, y - 3, C_AURA2);
+    px(x - 3, y + 3, C_AURA2); px(x + 3, y + 3, C_AURA2);
+}
+
+static void draw_ambient(muse_ambient_period_t period, muse_ambient_weather_t weather, float t)
+{
+    if (period == MUSE_AMBIENT_NIGHT) {
+        static const char *const MOON[] = {
+            "..####.", ".###...", "###....", "##.....", "##.....", "###....", ".###...", "..####.",
+        };
+        stamp(MOON, 8, 51, 6, C_G1, C_G0);
+        draw_sparkle(8, 12, 0.5f + 0.4f * sinf(t * 1.2f), true);
+        draw_sparkle(55, 25, 0.5f + 0.4f * sinf(t * 1.4f + 2), true);
+        draw_sparkle(12, 37, 0.4f + 0.4f * sinf(t * 1.0f + 4), false);
+        /* A tiny sleep bubble floats away, then disappears before restarting. */
+        float z = fracf(t / 5.5f);
+        if (z < 0.72f) {
+            static const char *const Z[] = { "###", "..#", ".#.", "###" };
+            stamp(Z, 4, 50 + iround(z * 4), 32 - iround(z * 12), C_ACC, C_ACC);
+        }
+    } else if (period == MUSE_AMBIENT_MORNING) {
+        draw_sun(10, 11 + iround(sinf(t * 0.6f)), t);
+    } else if (period == MUSE_AMBIENT_DAY) {
+        /* A small butterfly loops gently beside the character. */
+        int x = 9 + iround(sinf(t * 0.65f) * 3);
+        int y = 18 + iround(sinf(t * 0.9f) * 6);
+        px(x, y, C_WHITE); px(x, y + 1, C_G1);
+        if ((int)(t * 5) & 1) {
+            px(x - 1, y, C_ACC); px(x + 1, y, C_ACC);
+        } else {
+            px(x - 2, y - 1, C_G1); px(x + 2, y - 1, C_G1);
+            px(x - 1, y, C_ACC); px(x + 1, y, C_ACC);
+            px(x - 1, y + 1, C_G2); px(x + 1, y + 1, C_G2);
+        }
+    } else if (period == MUSE_AMBIENT_EVENING) {
+        for (int i = 0; i < 4; i++) {
+            int x = (i & 1 ? 55 : 8) + iround(sinf(t * 0.45f + i) * 2);
+            int y = 14 + i * 10 + iround(sinf(t * 0.7f + i * 2) * 3);
+            draw_sparkle(x, y, 0.45f + 0.5f * sinf(t * 1.3f + i * 1.9f), true);
+        }
+    }
+
+    if (weather == MUSE_WEATHER_CLEAR && period != MUSE_AMBIENT_NIGHT &&
+        period != MUSE_AMBIENT_MORNING) {
+        draw_sun(53, 10, t);
+    } else if (weather == MUSE_WEATHER_CLOUDY || weather == MUSE_WEATHER_RAIN) {
+        static const char *const CLOUD[] = {
+            "...###.....", ".#######...", "##########.", ".##########",
+        };
+        int drift = iround(sinf(t * 0.35f) * 2);
+        stamp(CLOUD, 4, 25 + drift, 2, C_G1, C_G0);
+        if (weather == MUSE_WEATHER_RAIN) {
+            for (int i = 0; i < 6; i++) {
+                int x = i < 3 ? 5 + i * 5 : 49 + (i - 3) * 4;
+                int y = 7 + (int)(fracf(t * 0.45f + i * 0.17f) * 44);
+                px(x, y, C_G2); px(x - 1, y + 1, C_G1);
+            }
+        }
+    } else if (weather == MUSE_WEATHER_SNOW) {
+        for (int i = 0; i < 6; i++) {
+            int x = (i < 3 ? 8 : 53) + iround(sinf(t * 0.65f + i) * 4);
+            int y = 4 + (int)(fracf(t * 0.10f + i * 0.165f) * 49);
+            draw_sparkle(x, y, i & 1 ? 0.6f : 0.25f, true);
+        }
+    } else if (weather == MUSE_WEATHER_WIND) {
+        for (int i = 0; i < 3; i++) {
+            int x = (int)(fracf(t * 0.16f + i * 0.33f) * 70) - 6;
+            int y = 5 + i * 3;
+            for (int k = 0; k < 4; k++) {
+                px(x + k, y, k == 3 ? C_G1 : C_AURA2);
+            }
+        }
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * Frame
  * ------------------------------------------------------------------------- */
@@ -896,7 +1053,13 @@ void muse_pixel_render(const muse_pose_t *p)
     float level = p->level;
     float t = p->t;
 
-    update_palette(&SCHEMES[mode], dt);
+    muse_ambient_period_t ambient = MUSE_AMBIENT_UNSET;
+    muse_ambient_weather_t weather = MUSE_WEATHER_UNKNOWN;
+    if (mode == MUSE_MODE_IDLE && happy <= 0) {
+        ambient_context(&ambient, &weather);
+    }
+    bool ambient_idle = mode == MUSE_MODE_IDLE && happy <= 0 && ambient != MUSE_AMBIENT_UNSET;
+    update_palette(ambient_idle ? &AMBIENT_SCHEMES[ambient] : &SCHEMES[mode], dt);
     float blink = eyes_update(p, dt);
 
     memset(s_fb, C_BG, sizeof(s_fb));
@@ -925,11 +1088,40 @@ void muse_pixel_render(const muse_pose_t *p)
     if (happy > 0) {
         hop = fabsf(sinf(t * 9.0f)) * 3.0f * happy;
     }
+    /* A gesture arrives, holds softly, then returns to neutral. Longer pauses
+     * keep a desk companion calm; these aren't frantic repeating emotes. */
+    float gesture = 0;
+    if (ambient_idle) {
+        float period = ambient == MUSE_AMBIENT_MORNING ? 18 : 14;
+        float phase = fracf(p->mode_t / period) * period;
+        float duration = ambient == MUSE_AMBIENT_MORNING ? 5.0f : 3.6f;
+        gesture = phase < duration ? sinf(phase / duration * TAU * 0.5f) : 0;
+        gesture *= gesture;
+        if (ambient == MUSE_AMBIENT_MORNING) {
+            breathe_rate = 1.6f;
+            bob -= gesture * 1.5f;
+        } else if (ambient == MUSE_AMBIENT_DAY) {
+            lean += sinf(t * 3.0f) * 0.6f * gesture;
+        } else if (ambient == MUSE_AMBIENT_EVENING) {
+            breathe_rate = 1.3f;
+            bob = sinf(t * 1.3f) * 0.6f;
+            lean = sinf(t * 0.65f) * 0.7f;
+        } else if (ambient == MUSE_AMBIENT_NIGHT) {
+            breathe_rate = 1.0f;
+            bob = sinf(t) * 0.35f;
+            lean = sinf(t * 0.5f) * 0.45f;
+        }
+    }
 
     /* Boot: the avatar pops up from a squash, then opens their eyes. */
     float boot = mode == MUSE_MODE_BOOT ? clampf(p->mode_t / 1.4f, 0, 1) : 1.0f;
     float pop = mode == MUSE_MODE_BOOT ? clampf(p->mode_t / 0.6f, 0, 1) : 1.0f;
     float squash = 1.0f - (1.0f - pop) * 0.35f + sinf(pop * 3.1416f) * 0.06f;
+    if (ambient_idle && ambient == MUSE_AMBIENT_MORNING) {
+        squash += gesture * 0.055f;
+    } else if (ambient_idle && ambient == MUSE_AMBIENT_NIGHT) {
+        squash *= 0.965f;
+    }
 
     float breathe = sinf(t * breathe_rate + 1.0f) * 0.03f;
     avatar_t j;
@@ -956,6 +1148,10 @@ void muse_pixel_render(const muse_pose_t *p)
     float spk_speed = mode == MUSE_MODE_THINKING ? 2.8f : mode == MUSE_MODE_LISTENING ? 1.2f
                     : mode == MUSE_MODE_SPEAKING ? 1.5f : 0.6f;
     int spk_count = mode == MUSE_MODE_BOOT ? (int)(boot * 6) : (int)(6 * fade);
+    if (ambient_idle) {
+        spk_count = ambient == MUSE_AMBIENT_NIGHT ? 0 : 3;
+        spk_speed *= 0.6f;
+    }
     draw_sparkles(p, j.cx, j.cy, false, spk_speed, spk_count);
 
     /* ---- limbs ---- */
@@ -1005,6 +1201,22 @@ void muse_pixel_render(const muse_pose_t *p)
         break;
     }
     }
+    if (ambient_idle) {
+        if (ambient == MUSE_AMBIENT_MORNING) {
+            arms[0].y -= 15 * gesture;
+            arms[1].y -= 15 * gesture;
+            arms[0].angle += 2.0f * gesture;
+            arms[1].angle -= 2.0f * gesture;
+        } else if (ambient == MUSE_AMBIENT_DAY) {
+            arms[1].y -= 12 * gesture;
+            arms[1].angle -= (2.5f + sinf(t * 9.0f) * 0.35f) * gesture;
+        } else if (ambient == MUSE_AMBIENT_EVENING) {
+            arms[0].x += 5 * gesture;
+            arms[1].x -= 5 * gesture;
+            arms[0].angle -= 0.9f * gesture;
+            arms[1].angle += 0.9f * gesture;
+        }
+    }
     draw_avatar(&j, arms, feet);
 
     /* ---- face ---- */
@@ -1042,6 +1254,18 @@ void muse_pixel_render(const muse_pose_t *p)
     default:
         break;
     }
+    if (ambient_idle) {
+        if (ambient == MUSE_AMBIENT_MORNING && gesture > 0.5f) {
+            open *= 1 - gesture;
+            mouth = MOUTH_O;
+        } else if (ambient == MUSE_AMBIENT_DAY && gesture > 0.6f) {
+            style = EYES_HAPPY;
+        } else if (ambient == MUSE_AMBIENT_EVENING) {
+            open *= 0.8f - 0.45f * gesture;
+        } else if (ambient == MUSE_AMBIENT_NIGHT) {
+            open = 0.12f;
+        }
+    }
     if (happy > 0.2f && mode != MUSE_MODE_ERROR) {
         style = EYES_HAPPY;
         mouth = MOUTH_GRIN;
@@ -1068,6 +1292,9 @@ void muse_pixel_render(const muse_pose_t *p)
 
     /* ---- foreground ---- */
     draw_sparkles(p, j.cx, j.cy, true, spk_speed, spk_count);
+    if (ambient_idle) {
+        draw_ambient(ambient, weather, t);
+    }
 
     float top = j.cy - j.b;
     if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {

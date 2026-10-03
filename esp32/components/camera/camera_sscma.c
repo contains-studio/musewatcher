@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -198,6 +199,53 @@ static esp_err_t sscma_init(void)
     return s_cfg.reset ? s_cfg.reset(true) : ESP_OK;
 }
 
+/* Himax samples include bytes after the JPEG. Find EOI at a marker boundary,
+ * not inside APP metadata or an escaped entropy byte. This validates framing;
+ * the preview decoder still validates the compressed image itself. */
+static size_t jpeg_frame_length(const uint8_t *jpeg, size_t len)
+{
+    if (!jpeg || len < 4 || jpeg[0] != 0xff || jpeg[1] != 0xd8) return 0;
+    size_t at = 2;
+    bool scan = false, have_frame = false, have_scan = false;
+    while (at < len) {
+        bool in_scan = scan;
+        if (scan) {
+            while (at < len && jpeg[at] != 0xff) at++;
+            if (at == len) return 0;
+        }
+        if (jpeg[at++] != 0xff) return 0;
+        while (at < len && jpeg[at] == 0xff) at++;   /* marker fill bytes */
+        if (at == len) return 0;
+        uint8_t marker = jpeg[at++];
+        if (scan && marker == 0x00) continue;       /* escaped FF in entropy */
+        if (marker >= 0xd0 && marker <= 0xd7) {
+            if (!scan) return 0;
+            continue;                             /* restart marker */
+        }
+        if (marker == 0x01) continue;              /* standalone TEM marker */
+        if (marker == 0xd9) return have_frame && have_scan ? at : 0;
+        if (marker < 0xc0 || marker == 0xd8) return 0;
+        if (len - at < 2) return 0;
+        size_t segment = ((size_t)jpeg[at] << 8) | jpeg[at + 1];
+        if (segment < 2 || segment > len - at) return 0;
+        /* SOF and SOS carry component counts; reject malformed headers before
+         * treating arbitrary trailing bytes as compressed scan data. */
+        if (marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc) {
+            if (segment < 8 || !jpeg[at + 7] || segment != 8u + 3u * jpeg[at + 7]) return 0;
+            have_frame = true;
+        }
+        if (marker == 0xda) {
+            if (!have_frame || segment < 6 || !jpeg[at + 2] || segment != 6u + 2u * jpeg[at + 2]) return 0;
+            have_scan = scan = true;
+        } else {
+            if (marker == 0xdc && segment != 4) return 0;
+            scan = in_scan && marker == 0xdc;      /* DNL continues the scan */
+        }
+        at += segment;
+    }
+    return 0;
+}
+
 /* The image in a SAMPLE event, decoded into `out`. */
 static esp_err_t take_image(const cJSON *event, camera_frame_t *out)
 {
@@ -207,8 +255,8 @@ static esp_err_t take_image(const cJSON *event, camera_frame_t *out)
     size_t b64_len = strlen(b64), len = 0;
     uint8_t *jpeg = heap_caps_malloc(b64_len / 4 * 3 + 3, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_RETURN_ON_FALSE(jpeg, ESP_ERR_NO_MEM, TAG, "image buffer");
-    if (mbedtls_base64_decode(jpeg, b64_len / 4 * 3 + 3, &len, (const unsigned char *)b64, b64_len) || len < 4
-        || jpeg[0] != 0xff || jpeg[1] != 0xd8) {
+    if (mbedtls_base64_decode(jpeg, b64_len / 4 * 3 + 3, &len, (const unsigned char *)b64, b64_len)
+        || !(len = jpeg_frame_length(jpeg, len))) {
         free(jpeg);
         ESP_LOGW(TAG, "the sample isn't a JPEG");
         return ESP_ERR_INVALID_RESPONSE;

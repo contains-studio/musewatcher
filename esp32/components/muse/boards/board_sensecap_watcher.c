@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -25,8 +26,6 @@
  * Pins follow Seeed's sensecap-watcher BSP
  * (SenseCAP-Watcher-Firmware) and xiaozhi-esp32's sensecap-watcher board.
  */
-#include <stdlib.h>
-
 #include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
 #include "driver/ledc.h"
@@ -50,6 +49,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "led_strip.h"
 
 #include "muse_audio.h"
 #include "muse_board.h"
@@ -90,6 +90,7 @@ static const char *TAG = "board";
 
 #define KNOB_A GPIO_NUM_41
 #define KNOB_B GPIO_NUM_42
+#define RGB_CTRL GPIO_NUM_40      /* one WS2812 indicator, Seeed's BSP pin */
 #define BATT_ADC ADC_CHANNEL_2     /* GPIO3, through a 62k/20k divider */
 
 /* PCA9535 at 0x21: port 0 in the low byte, port 1 in the high byte. */
@@ -119,8 +120,6 @@ static const char *TAG = "board";
 
 #define DEBOUNCE_SAMPLES 3
 #define TURN_COUNTS 2      /* encoder quarter-steps that make a turn */
-#define TURN_REST 20       /* 200 ms without movement ends a turn */
-#define TURN_MAX 40        /* 400 ms, well short of Muse's hold-to-power-off */
 #define TP_LIFT_MS 40      /* touch reads empty this long before the finger counts as lifted */
 #define TP_POLL_MS 10      /* between touch polls while a finger is down */
 #define TP_IDLE_POLL_MS 20 /* and while not */
@@ -239,6 +238,29 @@ static esp_err_t knob_init(void)
     return pcnt_unit_start(s_knob);
 }
 
+/* The RGB LED can retain its last color across an ESP32 reset. Send black
+ * explicitly, then release the RMT channel and leave its data line low. */
+static esp_err_t rgb_off(void)
+{
+    const led_strip_config_t led_cfg = {
+        .strip_gpio_num = RGB_CTRL,
+        .max_leds = 1,
+        .led_model = LED_MODEL_WS2812,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+    };
+    const led_strip_rmt_config_t rmt_cfg = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000,
+    };
+    led_strip_handle_t led;
+    ESP_RETURN_ON_ERROR(led_strip_new_rmt_device(&led_cfg, &rmt_cfg, &led), TAG, "RGB init");
+    esp_err_t clear_err = led_strip_clear(led);
+    ESP_RETURN_ON_ERROR(led_strip_del(led), TAG, "RGB release");
+    ESP_RETURN_ON_ERROR(gpio_set_level(RGB_CTRL, 0), TAG, "RGB low");
+    ESP_RETURN_ON_ERROR(gpio_set_direction(RGB_CTRL, GPIO_MODE_OUTPUT), TAG, "RGB output");
+    return clear_err;
+}
+
 static esp_err_t init(void)
 {
     /* Hold the LCD and touch lines low until the LCD rail is up, as Seeed's BSP does. */
@@ -281,6 +303,12 @@ static esp_err_t init(void)
     vTaskDelay(pdMS_TO_TICKS(100));
     ESP_RETURN_ON_ERROR(exp_set(EXP_RAILS, true), TAG, "rails");
     vTaskDelay(pdMS_TO_TICKS(50));
+    esp_err_t rgb_err = rgb_off();
+    if (rgb_err == ESP_OK) {
+        ESP_LOGI(TAG, "RGB indicator off");
+    } else {
+        ESP_LOGW(TAG, "could not turn RGB indicator off: %s", esp_err_to_name(rgb_err));
+    }
 #if CONFIG_MUSE_WATCHER_CAMERA
     ESP_RETURN_ON_ERROR(watcher_camera_prepare(), TAG, "camera lock");
     /* Reset stays untouched, as before: powering the camera up resets it. */
@@ -672,47 +700,45 @@ static unsigned poll_wheel_push(void)
 }
 
 /*
- * A turn of the wheel, either way, reads as one short press: it goes down on
- * the first step and up once the wheel rests. A long turn is cut short so it
- * can't become Muse's hold-to-power-off; the rest of it is ignored.
+ * Keep the encoder's direction and remainder: one detent per input poll,
+ * including steps left over from a fast turn. The paused GPIO wake cannot
+ * tell direction; one event wakes the screen and is consumed by the input
+ * task, without replaying movement after PCNT restarts.
  */
 static unsigned poll_wheel_turn(void)
 {
-    static int moved, rest, held;
-    static bool down, spent;
+    static int moved;
+    static bool wake_sent;
     int n = 0;
     if (s_paused) {
-        n = s_wheel_moved ? TURN_COUNTS : 0;
-    } else if (pcnt_unit_get_count(s_knob, &n) == ESP_OK && n) {
-        pcnt_unit_clear_count(s_knob);
-    }
-    rest = n ? 0 : rest + 1;
-    if (down) {
-        if (rest < TURN_REST && ++held < TURN_MAX) {
-            return 0;
+        bool wake = s_wheel_moved;
+        s_wheel_moved = false;
+        moved = 0;
+        if (wake && !wake_sent) {
+            wake_sent = true;
+            return MUSE_BTN_WHEEL_NEXT;
         }
-        down = false;
-        spent = rest < TURN_REST;
-        moved = 0;
-        return MUSE_BTN_TALK_RELEASE;
-    }
-    if (rest >= TURN_REST) {
-        moved = 0;
-        spent = false;
         return 0;
     }
-    moved += n;
-    if (spent || abs(moved) < TURN_COUNTS) {
-        return 0;
+    wake_sent = false;
+    if (pcnt_unit_get_count(s_knob, &n) == ESP_OK && n) {
+        pcnt_unit_clear_count(s_knob);
+        moved += n;
     }
-    down = true;
-    held = 0;
-    return MUSE_BTN_TALK_PRESS;
+    if (moved >= TURN_COUNTS) {
+        moved -= TURN_COUNTS;
+        return MUSE_BTN_WHEEL_NEXT;
+    }
+    if (moved <= -TURN_COUNTS) {
+        moved += TURN_COUNTS;
+        return MUSE_BTN_WHEEL_PREV;
+    }
+    return 0;
 }
 
 static unsigned poll_buttons(void)
 {
-    return poll_wheel_push() | poll_wheel_turn() << 2;
+    return poll_wheel_push() | poll_wheel_turn();
 }
 
 /*
@@ -800,11 +826,11 @@ static const muse_board_t s_board = {
     .diagonal_in = 1.45f,
     .talk_button = "wheel",
     .aux_button = "scroll",
-    /* The wheel is in the top-right corner: press it to talk, turn it to sleep.
-     * Turning it isn't a button of its own, so no aux_hint: a power icon beside
-     * the wheel would point at a button that isn't there. */
+    /* The wheel is in the top-right corner: hold it to talk, turn to navigate.
+     * Rotation has its own events, so there is no separate aux button hint. */
     .talk_hint = { LV_ALIGN_CENTER, 100, -143 },    /* 55 degrees above 3 o'clock */
     .frame_ms = 40,
+    .idle_avatar_y_offset = 40,
     .init = init,
     .display_start = display_start,
     .display_lock = display_lock,

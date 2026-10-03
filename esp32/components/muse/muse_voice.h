@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -17,10 +18,13 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "muse_photo_upload.h"
 
 /*
  * Push-to-talk turn loop: hold -> stream speech to Hatch, release -> think -> speak.
@@ -29,6 +33,17 @@
  * drives muse_state for the UI.
  */
 esp_err_t muse_voice_start(QueueHandle_t queue);
+
+typedef void (*muse_photo_sent_cb_t)(bool sent, const char *error, void *ctx);
+/*
+ * Explicitly sends this JPEG, then shows Muse's reply through the voice UI.
+ * Copies the bytes before returning true; the caller always owns its original.
+ * False rejects a busy/offline/invalid request without calling the callback.
+ * After true, the voice task calls back exactly once: sent means a server ACK
+ * or a reply, never merely queued bytes. The error string lives only for the
+ * callback. No automatic retry; uncertain delivery is reported as such.
+ */
+bool muse_voice_send_photo(const uint8_t *jpeg, size_t len, muse_photo_sent_cb_t callback, void *ctx);
 
 /* While on (settings' Sound page), idle mic audio feeds muse_voice_monitor_db(). */
 void muse_voice_set_monitor(bool on);

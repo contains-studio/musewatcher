@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 #define _POSIX_C_SOURCE 200809L
 
 /*
@@ -67,7 +68,7 @@ static void usage(FILE *out, const char *argv0)
             "  wifi=off|no_network|connecting|connected|failed|not_nearby\n"
             "  ble=off|advertising|connected         passkey=0..999999\n"
             "  paired=true|false  link=boot|unpaired|pairing|confirm|connecting|online|offline|error\n"
-            "  speaker=true|false brightness=10..100 advance=MILLISECONDS\n"
+            "  speaker=true|false microphone=true|false brightness=10..100 advance=MILLISECONDS\n"
             "\n"
             "Interactive keys: F1..F7 select face states, H is happy, Space is\n"
             "push-to-talk, +/- change level, [/] change progress, S sleeps,\n"
@@ -291,6 +292,7 @@ static bool set_link(const char *value)
 
 static bool apply_setting(const char *key, const char *value, bool real_time)
 {
+    if (!strcmp(key, "camera")) return sim_services_set_camera(value);
     bool flag;
     long number;
     float scalar;
@@ -355,6 +357,10 @@ static bool apply_setting(const char *key, const char *value, bool real_time)
     }
     if (!strcmp(key, "speaker") && parse_bool(value, &flag)) {
         sim_services_set_speaker(flag);
+        return true;
+    }
+    if (!strcmp(key, "microphone") && parse_bool(value, &flag)) {
+        sim_services_set_microphone(flag);
         return true;
     }
     if (!strcmp(key, "brightness") && parse_long(value, 10, 100, &number)) {

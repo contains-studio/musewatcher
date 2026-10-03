@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -20,9 +21,13 @@
 #include <string.h>
 
 #include "muse_console.h"
+#include "muse_input.h"
 #include "muse_menu.h"
 #include "muse_settings.h"
 #include "muse_settings_ui.h"
+#include "muse_state.h"
+#include "muse_ui.h"
+#include "boards/watcher_camera.h"
 
 #define SIM_DEFAULT_NAME "MuseGadget-SIM001"
 #define SIM_DEFAULT_SSID "Muse Simulator"
@@ -44,6 +49,24 @@ static muse_hatch_status_t s_chat = {
 static muse_link_state_t s_link = MUSE_LINK_ONLINE;
 static int s_brightness = 75;
 static bool s_speaker = true;
+static bool s_mic = true;
+static watcher_camera_state_t s_camera = WATCHER_CAMERA_CLOSED;
+static char s_camera_error[96];
+
+/* Simulated voice feedback for the production UI's real touch gestures.
+ * No microphone capture or network submission occurs in the simulator. */
+void muse_input_touch(muse_ptt_t type)
+{
+    bool down = type == MUSE_PTT_DOWN, cancel = type == MUSE_PTT_CANCEL;
+    fprintf(stderr, "touch PTT %s\n", down ? "down" : cancel ? "cancel" : "up");
+    if (down) {
+        muse_state_set_mode(s_mic ? MUSE_MODE_LISTENING : MUSE_MODE_IDLE);
+        muse_state_set_caption(s_mic ? "LISTENING..." : "MIC OFF");
+    } else if (muse_state_mode(NULL) == MUSE_MODE_LISTENING) {
+        muse_state_set_mode(cancel ? MUSE_MODE_IDLE : MUSE_MODE_THINKING);
+        muse_state_set_caption(cancel ? "CANCELLED" : "");
+    }
+}
 
 static void copy_text(char *out, size_t cap, const char *text)
 {
@@ -80,6 +103,9 @@ void sim_services_reset(void)
     s_link = MUSE_LINK_ONLINE;
     s_brightness = 75;
     s_speaker = true;
+    s_mic = true;
+    s_camera = WATCHER_CAMERA_CLOSED;
+    s_camera_error[0] = '\0';
 }
 
 void sim_services_set_wifi(muse_wifi_state_t state, const char *ssid)
@@ -135,6 +161,11 @@ void sim_services_set_speaker(bool on)
     s_speaker = on;
 }
 
+void sim_services_set_microphone(bool on)
+{
+    s_mic = on;
+}
+
 int muse_settings_brightness(void)
 {
     return s_brightness;
@@ -144,6 +175,45 @@ bool muse_settings_speaker_on(void)
 {
     return s_speaker;
 }
+
+bool muse_settings_mic_on(void) { return s_mic; }
+void muse_settings_set_mic_on(bool on) { s_mic = on; }
+
+/* UI fixtures only: no camera hardware or network upload is emulated. */
+bool sim_services_set_camera(const char *state)
+{
+    static const char *const names[] = { "closed", "starting", "live", "capturing", "review", "sending" };
+    bool error = !strcmp(state, "error");
+    int i;
+    for (i = 0; i < 6; i++) if (!strcmp(state, names[i])) break;
+    if (i == 6 && !error) return false;
+    s_camera = error ? WATCHER_CAMERA_REVIEW : (watcher_camera_state_t)i;
+    copy_text(s_camera_error, sizeof(s_camera_error), error ? "Couldn't send. Try again." : "");
+    if (s_camera == WATCHER_CAMERA_CLOSED) {
+        muse_ui_image_hide();
+    } else {
+        uint16_t row[412];
+        for (int y = 0; y < 412; y++) {
+            for (int x = 0; x < 412; x++) {
+                uint16_t color = ((x / 48 + y / 48) % 2) ? 0x196e : 0x42d5;
+                row[x] = (color >> 8) | (color << 8);
+            }
+            muse_ui_image_draw(0, y, 412, 1, row);
+        }
+    }
+    return true;
+}
+
+watcher_camera_state_t watcher_camera_state(void) { return s_camera; }
+void watcher_camera_status(char *error, size_t cap) { copy_text(error, cap, s_camera_error); }
+bool watcher_camera_preview_active(void) { return s_camera == WATCHER_CAMERA_LIVE; }
+void watcher_camera_preview_toggle(void)
+{
+    sim_services_set_camera(s_camera == WATCHER_CAMERA_LIVE ? "review" : "live");
+}
+void watcher_camera_retake(void) { sim_services_set_camera("live"); }
+void watcher_camera_send(void) { sim_services_set_camera("sending"); }
+void watcher_camera_close(void) { sim_services_set_camera("closed"); }
 
 void muse_settings_set_brightness(int pct)
 {

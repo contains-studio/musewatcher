@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -23,6 +24,9 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#if CONFIG_MUSE_ENABLED
+#include "esp_netif_sntp.h"
+#endif
 #include "esp_log.h"
 #include "soc/soc_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -191,6 +195,14 @@ static void event_handler(void *arg, esp_event_base_t base,
         s_keep_connected = true;
         s_reconnect_backoff_ms = RECONNECT_BACKOFF_MIN_MS;  // reset on success
         xEventGroupSetBits(s_events, BIT_CONNECTED | BIT_GOT_IP);
+#if CONFIG_MUSE_ENABLED
+        /* Idle animations use wall time only after the clock is synchronized. */
+        static bool clock_started;
+        if (!clock_started) {
+            esp_sntp_config_t clock_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+            clock_started = esp_netif_sntp_init(&clock_config) == ESP_OK;
+        }
+#endif
     }
 }
 

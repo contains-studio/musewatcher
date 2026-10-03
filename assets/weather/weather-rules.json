@@ -1,0 +1,230 @@
+{
+  "version": 4,
+  "status": "skill_selection_rules",
+  "description": "Choose among thirteen bundled Muse outfit assets by observed weather; feels-like temperature falls back to current temperature. Known dry weather at 24C or warmer uses shorts and sandals with no top.",
+  "temperatureInput": "feels_like_c, otherwise temperature_c",
+  "windInputs": [
+    "wind_kmh",
+    "gust_kmh"
+  ],
+  "canonicalUnits": {
+    "temperature": "celsius",
+    "wind": "km/h"
+  },
+  "temperatureBands": {
+    "freezing": {
+      "minInclusiveC": null,
+      "maxExclusiveC": 0
+    },
+    "cold": {
+      "minInclusiveC": 0,
+      "maxExclusiveC": 7
+    },
+    "cool": {
+      "minInclusiveC": 7,
+      "maxExclusiveC": 14
+    },
+    "mild": {
+      "minInclusiveC": 14,
+      "maxExclusiveC": 22
+    },
+    "warm": {
+      "minInclusiveC": 22,
+      "maxExclusiveC": 32
+    },
+    "heatwave": {
+      "minInclusiveC": 32,
+      "maxExclusiveC": null
+    }
+  },
+  "conditionGroups": {
+    "icy_or_mixed": [
+      "sleet",
+      "freezing_rain",
+      "mixed_rain_snow",
+      "hail"
+    ],
+    "snow": [
+      "snow",
+      "snow_showers",
+      "heavy_snow",
+      "blizzard"
+    ],
+    "rain_or_storm": [
+      "drizzle",
+      "rain",
+      "showers",
+      "thunderstorm"
+    ],
+    "fog_or_mist": [
+      "fog",
+      "mist"
+    ],
+    "dry": [
+      "clear",
+      "sunny",
+      "partly_cloudy",
+      "cloudy",
+      "overcast"
+    ]
+  },
+  "windyThreshold": {
+    "windMinKmh": 20,
+    "gustMinKmh": 30,
+    "match": "either"
+  },
+  "taggingNotes": [
+    "If feels-like is unavailable, use current temperature. Preserve the chosen temperature basis in run metadata.",
+    "Observed weather and effective temperature control outfit selection. Calendar season does not override conditions.",
+    "Weather tags describe visual moods and are not all required at once. Dry calm weather from 22C to under 24C uses the crochet outfit.",
+    "The default hot-weather styling is shorts and sandals with natural cream fur and no top at 24C or warmer when a known dry condition is present. Precipitation rules take priority. Unknown conditions do not imply dry weather.",
+    "Icy mixed precipitation gets the long parka. Snow uses the puffer below freezing and the warm layers otherwise.",
+    "Rain uses a parka below 7C, the navy shell from 7C to under 22C, and the light shell at 22C or warmer.",
+    "Freezing and cold conditions take priority over wind. Known dry conditions at 24C or warmer use hot-shorts before wind rules; other windy conditions at 22C or warmer use the light striped outfit.",
+    "The fog outfit covers 7C to under 22C after precipitation, cold and wind have been considered. Outside that range use the temperature-appropriate outfit.",
+    "Heatwave means feels-like at least 32C for this visual wardrobe; it is not a meteorological alert definition.",
+    "Use Celsius for rule comparisons. Convert only the displayed values to the requested units.",
+    "The heatwave-linen asset handles remaining conditions at 32C or warmer when the known-dry hot-shorts rule has not matched."
+  ],
+  "selectionRules": [
+    {
+      "if": {
+        "conditionGroup": "icy_or_mixed"
+      },
+      "outfitId": "cold-rain-parka",
+      "order": 1
+    },
+    {
+      "if": {
+        "conditionGroup": "snow",
+        "temperatureBand": "freezing"
+      },
+      "outfitId": "freezing-puffer",
+      "order": 2
+    },
+    {
+      "if": {
+        "conditionGroup": "snow"
+      },
+      "outfitId": "cold-layers",
+      "order": 3
+    },
+    {
+      "if": {
+        "conditionGroup": "rain_or_storm",
+        "temperatureRangeC": {
+          "minInclusiveC": null,
+          "maxExclusiveC": 7
+        }
+      },
+      "outfitId": "cold-rain-parka",
+      "order": 4
+    },
+    {
+      "if": {
+        "conditionGroup": "rain_or_storm",
+        "temperatureRangeC": {
+          "minInclusiveC": 22,
+          "maxExclusiveC": null
+        }
+      },
+      "outfitId": "warm-rain-shell",
+      "order": 5
+    },
+    {
+      "if": {
+        "conditionGroup": "rain_or_storm"
+      },
+      "outfitId": "rain-shell",
+      "order": 6
+    },
+    {
+      "if": {
+        "temperatureBand": "freezing"
+      },
+      "outfitId": "freezing-puffer",
+      "order": 7
+    },
+    {
+      "if": {
+        "temperatureBand": "cold"
+      },
+      "outfitId": "cold-layers",
+      "order": 8
+    },
+    {
+      "if": {
+        "conditionGroup": "dry",
+        "temperatureRangeC": {
+          "minInclusiveC": 24,
+          "maxExclusiveC": null
+        }
+      },
+      "outfitId": "hot-shorts",
+      "order": 9
+    },
+    {
+      "if": {
+        "windy": true,
+        "temperatureRangeC": {
+          "minInclusiveC": 22,
+          "maxExclusiveC": null
+        }
+      },
+      "outfitId": "hot-wind-stripes",
+      "order": 10
+    },
+    {
+      "if": {
+        "windy": true
+      },
+      "outfitId": "wind-shell",
+      "order": 11
+    },
+    {
+      "if": {
+        "conditionGroup": "fog_or_mist",
+        "temperatureRangeC": {
+          "minInclusiveC": 7,
+          "maxExclusiveC": 22
+        }
+      },
+      "outfitId": "fog-overshirt",
+      "order": 12
+    },
+    {
+      "if": {
+        "temperatureBand": "heatwave"
+      },
+      "outfitId": "heatwave-linen",
+      "order": 13
+    },
+    {
+      "if": {
+        "temperatureBand": "cool"
+      },
+      "outfitId": "cool-suede",
+      "order": 14
+    },
+    {
+      "if": {
+        "temperatureBand": "mild"
+      },
+      "outfitId": "mild-knit",
+      "order": 15
+    },
+    {
+      "if": {
+        "temperatureBand": "warm"
+      },
+      "outfitId": "warm-crochet",
+      "order": 16
+    }
+  ],
+  "selectionSemantics": "Evaluate rules in listed order; the first match wins. All fields within an if object must match. conditionGroup matches when any observed condition tag is in that group. temperatureBand refers to temperatureBands; temperatureRangeC uses an inclusive lower and exclusive upper bound, with null meaning unbounded. Both use feels_like_c when available, otherwise temperature_c. Do not substitute a daily high or low for the current temperature. windy matches when either wind or gust reaches windyThreshold. Missing inputs never match requirements for those inputs. Rules for known precipitation or wind without temperature bounds can still match if temperature is missing. Use fallbackOutfitId only when no rule matches.",
+  "fallbackOutfitId": "mild-knit",
+  "defaultWeatherTagsIfUnavailable": [
+    "weather_unknown"
+  ],
+  "conditionInput": "conditions: normalized weather tags; a single tag may be treated as a one-item list"
+}

@@ -1,3 +1,4 @@
+# Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -67,7 +68,8 @@ if(CONFIG_MUSE_ENABLED)
     elseif(CONFIG_MUSE_BOARD_WAVESHARE_C6_18)
         list(APPEND srcs "boards/board_waveshare_c6_18.c")
     elseif(CONFIG_MUSE_BOARD_SENSECAP_WATCHER)
-        list(APPEND srcs "boards/board_sensecap_watcher.c" "boards/muse_lcd_bands.c")
+        list(APPEND srcs "boards/board_sensecap_watcher.c" "boards/muse_lcd_bands.c"
+            "muse_wardrobe.c" "muse_wardrobe_settings.c")
         if(CONFIG_MUSE_WATCHER_CAMERA)
             list(APPEND srcs "boards/watcher_camera.c")
         endif()
@@ -88,7 +90,7 @@ set(muse_priv_requires
     bt esp-tls mbedtls esp_app_format esp_http_client
     noise_core minimp3
     esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi
-    esp_driver_pcnt)
+    esp_driver_pcnt led_strip)
 list(APPEND muse_priv_requires camera)
 
 idf_component_register(

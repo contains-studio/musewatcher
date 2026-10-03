@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -1312,6 +1313,19 @@ static char *build_register_json(void) {
                            "the agent's name.",
                     nullptr, nullptr);
     }
+#endif
+
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    cJSON *outfit_optional = cJSON_CreateObject();
+    cJSON_AddItemToObject(outfit_optional, "outfit_id", string_param(
+        "Outfit ID: default, mild-knit, warm-crochet, cool-suede, cold-layers, "
+        "wind-shell, rain-shell, heatwave-linen, freezing-puffer, cold-rain-parka, "
+        "fog-overshirt, warm-rain-shell, hot-wind-stripes, or hot-shorts."));
+    add_command(commands, "display.set_outfit",
+                "Choose the Watcher's idle outfit, kept across restarts. "
+                "The selection appears when the current image or weather card is dismissed. "
+                "Omit outfit_id to query the current selection; default restores the original character.",
+                nullptr, outfit_optional);
 #endif
 
 #if CONFIG_HOMEHUB_VOICE

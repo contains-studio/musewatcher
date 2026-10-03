@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -70,6 +71,11 @@
 #endif
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
+#endif
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+#include "muse_wardrobe.h"
+#include "muse_wardrobe_settings.h"
+#include "muse_ui.h"
 #endif
 #if CONFIG_MUSE_ENABLED
 #include "muse_glue.h"
@@ -1525,6 +1531,9 @@ typedef struct {
 
 static void draw_url_done(const image_fetch_result_t *r, void *user) {
     draw_url_ctx_t *ctx = user;
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    muse_ui_card_finish(r->ok);
+#endif
     cJSON *result = cJSON_CreateObject();
     cJSON_AddBoolToObject(result, "ok", r->ok);
     if (r->ok) {
@@ -1837,6 +1846,28 @@ static cJSON *on_ws_command(
         if (!url) return command_error("missing_param", "url is required");
         return queue_ws_control(WS_CONTROL_SET_VM, url);
     }
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    if (strcmp(command, "display.set_outfit") == 0) {
+        if (params && !cJSON_IsObject(params)) {
+            return command_error("invalid_params", "expected an object with optional outfit_id");
+        }
+        cJSON *id = cJSON_GetObjectItemCaseSensitive(params, "outfit_id");
+        if (id) {
+            if (!cJSON_IsString(id) || !id->valuestring) {
+                return command_error("invalid_params", "outfit_id must be a supported outfit ID");
+            }
+            esp_err_t err = muse_wardrobe_settings_set(id->valuestring);
+            if (err != ESP_OK) {
+                return command_error(err == ESP_ERR_INVALID_ARG ? "invalid_params" : "storage_error",
+                    err == ESP_ERR_INVALID_ARG ? "unsupported outfit_id" : "could not save outfit");
+            }
+        }
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        cJSON_AddStringToObject(result, "outfit_id", muse_wardrobe_current());
+        return result;
+    }
+#endif
 #if CONFIG_HOMEHUB_DISPLAY_COMMANDS
     if (strcmp(command, "display.draw_url") == 0) {
         cJSON *url = cJSON_GetObjectItem(params, "url");

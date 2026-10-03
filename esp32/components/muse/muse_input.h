@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -36,6 +37,7 @@
 typedef enum {
     MUSE_PTT_DOWN,
     MUSE_PTT_UP,
+    MUSE_PTT_CANCEL,  /* discard a touch recording after dragging/leaving home */
 } muse_ptt_t;
 
 typedef struct {
@@ -45,6 +47,9 @@ typedef struct {
 
 /* PTT events are posted to `queue` (items are muse_input_event_t). */
 esp_err_t muse_input_start(QueueHandle_t queue);
+
+/* UI-safe, nonblocking edge queue: the input task owns delivery to voice. */
+void muse_input_touch(muse_ptt_t type);
 
 /* Plays the goodbye animation and powers off (from the input task). */
 void muse_input_request_power_off(void);

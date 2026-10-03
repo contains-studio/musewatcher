@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -37,3 +38,5 @@ void sim_services_set_chat_status(muse_hatch_state_t state, const char *detail);
 void sim_services_set_link_state(muse_link_state_t state);
 void sim_services_set_brightness(int pct);
 void sim_services_set_speaker(bool on);
+void sim_services_set_microphone(bool on);
+bool sim_services_set_camera(const char *state);

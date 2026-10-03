@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -19,7 +20,7 @@
 /* The desktop target models a PSRAM-equipped, dual-core board. */
 #define CONFIG_SPIRAM 1
 #define CONFIG_FREERTOS_UNICORE 0
-#define CONFIG_MUSE_WATCHER_CAMERA 0
+#define CONFIG_MUSE_WATCHER_CAMERA 1
 #define CONFIG_MUSE_HATCH 1
 #define CONFIG_MUSE_CONSOLE_UART 0
 #define CONFIG_PM_PROFILING 0

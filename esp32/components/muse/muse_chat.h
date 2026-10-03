@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -77,6 +78,9 @@ bool muse_hatch_ready(void);
 
 /* Press: connects if needed and starts streaming speech to the VM. */
 void muse_hatch_turn_begin(void);
+/* Voice task only, CONFIG_MUSE_HATCH: transfers malloc'd JPEG on true. On
+ * false the caller retains it. Uses the normal turn events/caption path. */
+bool muse_chat_photo_turn(uint8_t *jpeg, size_t len);
 /* 16 kHz mono speech, in order, from press to release. */
 void muse_hatch_turn_audio(const int16_t *pcm, size_t frames);
 /* Release: no more audio; the reply follows. */

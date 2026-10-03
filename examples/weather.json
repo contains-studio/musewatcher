@@ -1,0 +1,11 @@
+{
+  "sample": true,
+  "description": "Synthetic demo values for the local renderer; not a live forecast.",
+  "conditions": ["clear"],
+  "temp_f": 78,
+  "feels_like_f": 80,
+  "high_f": 83,
+  "low_f": 63,
+  "wind_mph": 6,
+  "humidity_pct": 58
+}

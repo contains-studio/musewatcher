@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -17,6 +18,7 @@
 #include "muse_voice.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,6 +72,26 @@ static volatile bool s_chirp;
 static volatile bool s_loopback;
 static volatile bool s_mp3test;
 
+typedef struct {
+    uint8_t *jpeg;
+    size_t len;
+    muse_photo_sent_cb_t callback;
+    void *ctx;
+} photo_request_t;
+
+#if CONFIG_MUSE_HATCH
+static QueueHandle_t s_photos;   /* one pending photo; never placed in the PTT queue */
+static atomic_bool s_photo_busy;
+#endif
+
+static void photo_complete(photo_request_t *photo, bool sent, const char *error)
+{
+    if (!photo || !photo->callback) return;
+    muse_photo_sent_cb_t callback = photo->callback;
+    photo->callback = NULL;   /* exactly once, including a later failure or barge-in */
+    callback(sent, error, photo->ctx);
+}
+
 /*
  * Pre-roll: while idle the mic keeps running into this ring, so a recording
  * can start a little before the press. People start talking as they press,
@@ -91,6 +113,7 @@ static muse_adpcm_t s_pre_enc;
 #endif
 static int16_t s_chunk[MUSE_AUDIO_CHUNK];
 static int s_settle;
+static uint32_t s_pre_mic_generation;
 
 /*
  * The note being recorded (HOLD_NOTES), kept whole in case it can't go now.
@@ -100,6 +123,7 @@ static int16_t *s_rec;   /* MAX_FRAMES */
 static size_t s_rec_n, s_sent;
 static bool s_live = true;
 static bool s_tried;     /* it went to Hatch */
+static uint32_t s_rec_mic_generation;
 
 typedef struct {
     int16_t *pcm;
@@ -135,11 +159,42 @@ static void pre_reset(void)
     s_settle = SETTLE_CHUNKS;
 }
 
+static bool mic_current(uint32_t generation)
+{
+    return muse_settings_mic_on() && generation == muse_settings_mic_generation();
+}
+
+/* A quick OFF/ON must be observed even while this task was busy with a reply. */
+static uint32_t pre_sync_mic(void)
+{
+    uint32_t generation = muse_settings_mic_generation();
+    if (generation != s_pre_mic_generation) {
+        pre_reset();
+        s_monitor_db = -100.0f;
+        s_pre_mic_generation = generation;
+    }
+    return generation;
+}
+
 /* One 20 ms idle read: feeds the pre-roll ring and the settings mic meter. */
 static void idle_capture(void)
 {
-    if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
+    uint32_t generation = pre_sync_mic();
+    if (!mic_current(generation)) {
+        pre_reset();
+        s_monitor_db = -100.0f;
         vTaskDelay(pdMS_TO_TICKS(20));
+        return;
+    }
+    if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
+        pre_reset();
+        s_monitor_db = -100.0f;
+        vTaskDelay(pdMS_TO_TICKS(20));
+        return;
+    }
+    if (!mic_current(generation)) {
+        pre_reset();
+        s_monitor_db = -100.0f;
         return;
     }
     if (s_monitor) {
@@ -161,14 +216,28 @@ static void idle_capture(void)
     s_pre_fill = s_pre_fill < PRE_CHUNKS ? s_pre_fill + 1 : PRE_CHUNKS;
 }
 
-/* Non-blocking: returns true if an event of `type` arrived (others dropped). */
+static bool s_record_cancelled;   /* owned by the voice task */
+
+/* Non-blocking: look for an edge without consuming a subsequent note's DOWN.
+ * Cancellation also releases PTT, but record() discards its partial note. */
 static bool got_event(muse_ptt_t type)
 {
     muse_input_event_t ev;
     bool hit = false;
-    while (xQueueReceive(s_queue, &ev, 0) == pdTRUE) {
+    while (xQueuePeek(s_queue, &ev, 0) == pdTRUE) {
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+        /* The next DOWN belongs to a new note. Repeated tail checks for the
+         * old release/cancel must leave that press and its trailing edge.
+         * Other boards do not merge sources and may have duplicate DOWNs. */
+        if (type == MUSE_PTT_UP && ev.type == MUSE_PTT_DOWN) break;
+#endif
+        xQueueReceive(s_queue, &ev, 0);
         muse_state_poke();
-        hit |= ev.type == type;
+        if (ev.type == MUSE_PTT_CANCEL) s_record_cancelled = true;
+        hit |= ev.type == type || (type == MUSE_PTT_UP && ev.type == MUSE_PTT_CANCEL);
+        /* A reply can be interrupted by a press whose release/cancel is
+         * already queued. Leave that trailing edge for the new recording. */
+        if (hit && type == MUSE_PTT_DOWN) break;
     }
     return hit;
 }
@@ -204,6 +273,7 @@ static void keep(rec_stats_t *st, const int16_t *pcm, size_t n)
 static void feed_live(void)
 {
 #if HOLD_NOTES
+    if (!mic_current(s_rec_mic_generation)) return;
     if (s_live && s_sent < s_rec_n) {
         s_sent += muse_hatch_turn_audio_wait(s_rec + s_sent, s_rec_n - s_sent, 0);
     }
@@ -213,6 +283,7 @@ static void feed_live(void)
 /* Streams the note being recorded from its start, then the rest as it comes. */
 static void go_live(void)
 {
+    if (!mic_current(s_rec_mic_generation)) return;
     muse_hatch_turn_begin();
     s_live = s_tried = true;
     s_sent = 0;
@@ -222,6 +293,7 @@ static void go_live(void)
 /* One chunk of speech: into the stats, and on to Hatch, by way of the kept note if there is one. */
 static void take(rec_stats_t *st, const int16_t *pcm)
 {
+    if (!mic_current(s_rec_mic_generation)) return;
     keep(st, pcm, MUSE_AUDIO_CHUNK);
     if (!s_rec) {
         if (s_live) {
@@ -244,6 +316,10 @@ static void take(rec_stats_t *st, const int16_t *pcm)
  */
 static bool record(bool barge_in, size_t *held, char *why, size_t cap)
 {
+    s_record_cancelled = false;
+    bool released = got_event(MUSE_PTT_UP);
+    if (s_record_cancelled) goto cancelled;
+    if (!mic_current(s_rec_mic_generation)) goto muted;
     muse_state_set_mode(MUSE_MODE_LISTENING);
     muse_state_set_progress(0);
     s_rec_n = s_sent = 0;
@@ -261,22 +337,26 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
     if (barge_in) {
         /* Pressed during playback: the queued tail of the reply is still sounding. */
         for (int i = 0; i < SETTLE_CHUNKS; i++) {
+            if (!mic_current(s_rec_mic_generation)) goto muted;
             muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK);
         }
     } else {
         for (size_t i = 0; i < s_pre_fill; i++) {
+            if (!mic_current(s_rec_mic_generation)) goto muted;
             pre_get(i, s_chunk);
             take(&st, s_chunk);
             n += MUSE_AUDIO_CHUNK;
         }
     }
     size_t pre = n;
-    bool released = false;
-    size_t stop_at = MAX_FRAMES;
+    size_t stop_at = released ? n + TAIL_FRAMES : MAX_FRAMES;
     while (n + MUSE_AUDIO_CHUNK <= stop_at) {
+        if (!mic_current(s_rec_mic_generation)) goto muted;
         if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
+            if (!mic_current(s_rec_mic_generation)) goto muted;
             break;
         }
+        if (!mic_current(s_rec_mic_generation)) goto muted;
         muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
         take(&st, s_chunk);
         /* Live transcript as the caption. A failure stops the streaming; the
@@ -312,12 +392,17 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
          * Capture runs 60-80 ms behind real time and people let go on their
          * last syllable, so keep going briefly after release.
          */
-        if (!released && got_event(MUSE_PTT_UP)) {
+        bool release_now = got_event(MUSE_PTT_UP);
+        if (s_record_cancelled) goto cancelled;
+        if (!released && release_now) {
             released = true;
             stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
         }
     }
     muse_state_set_level(0);
+    got_event(MUSE_PTT_UP);
+    if (s_record_cancelled) goto cancelled;
+    if (!mic_current(s_rec_mic_generation)) goto muted;
     *held = n - pre;
 
     char tail[160];
@@ -332,6 +417,19 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
              (double)n / MUSE_AUDIO_RATE, released ? "" : " (max)", rms_db < -100.0f ? -100.0f : rms_db,
              20.0 * log10((st.peak + 1) / 32768.0), st.floor_db, st.clipped, muse_settings_mic_gain());
     return ok;
+muted:
+    strlcpy(why, "MIC OFF", cap);
+    goto discarded;
+cancelled:
+    strlcpy(why, "CANCELLED", cap);
+discarded:
+    muse_hatch_turn_cancel();
+    free(s_rec);
+    s_rec = NULL;   /* a muted/cancelled partial note must never be saved */
+    pre_reset();
+    muse_state_set_level(0);
+    *held = MIN_HELD_FRAMES;   /* preserve the reason instead of the short-hold hint */
+    return false;
 }
 
 static void go_idle(const char *caption);
@@ -340,10 +438,10 @@ static void go_idle(const char *caption);
  * Plays Hatch's reply as it arrives, with its text as the caption. Returns
  * true if interrupted by a new press. *delivered: the VM has the note.
  */
-static bool hatch_reply(bool *delivered)
+static bool hatch_reply(bool *delivered, photo_request_t *photo)
 {
     muse_state_set_mode(MUSE_MODE_THINKING);
-    muse_state_set_caption("SENDING VOICE NOTE");   /* until there's a transcript or reply */
+    muse_state_set_caption(photo ? "SENDING PHOTO" : "SENDING VOICE NOTE");
     static int16_t buf[MUSE_AUDIO_CHUNK];
     static const int16_t silence[MUSE_AUDIO_CHUNK];
     char text[96];
@@ -363,9 +461,11 @@ static bool hatch_reply(bool *delivered)
                 break;
             case MUSE_HATCH_EV_SENT:
                 *delivered = true;
+                photo_complete(photo, true, NULL);
                 break;
             case MUSE_HATCH_EV_REPLY:
                 replied = *delivered = true;
+                photo_complete(photo, true, NULL);
                 /* Once speech starts, the caption follows it. The event only
                  * has room for the page's start; the page itself comes below. */
                 if (!speaking && !muse_hatch_turn_caption(played, page, sizeof(page))) {
@@ -378,6 +478,7 @@ static bool hatch_reply(bool *delivered)
             case MUSE_HATCH_EV_ERROR:
                 ESP_LOGW(TAG, "muse: %s", text);
                 muse_state_set_level(0);
+                photo_complete(photo, false, text);
                 go_idle(text);
                 return false;
             default:
@@ -388,7 +489,14 @@ static bool hatch_reply(bool *delivered)
             ESP_LOGI(TAG, "reply interrupted");
             muse_hatch_turn_cancel();
             muse_state_set_level(0);
+            photo_complete(photo, false, "PHOTO SEND CANCELLED");
             return true;
+        }
+        if (photo && photo->callback && esp_timer_get_time() - t0 > ACK_WAIT_US) {
+            muse_hatch_turn_cancel();
+            photo_complete(photo, false, "PHOTO SEND NOT CONFIRMED");
+            go_idle("PHOTO SEND NOT CONFIRMED");
+            return false;
         }
         size_t n = muse_hatch_turn_read(buf, MUSE_AUDIO_CHUNK, speaking || done ? 0 : 20);
         if (n) {
@@ -413,6 +521,7 @@ static bool hatch_reply(bool *delivered)
         }
     }
     muse_state_set_level(0);
+    photo_complete(photo, false, "PHOTO SEND NOT CONFIRMED");
     ESP_LOGI(TAG, "muse reply: %.2fs of audio, %.2fs total", (double)played / MUSE_AUDIO_RATE,
              (esp_timer_get_time() - t0) / 1e6);
     if (!played) {
@@ -553,17 +662,19 @@ typedef enum {
     FED,
     FEED_FAILED,    /* the turn failed, or Hatch stopped taking audio */
     FEED_PRESSED,   /* a press is queued: it goes first */
+    FEED_MUTED,     /* microphone toggled: discard a new partial, keep saved notes */
 } feed_t;
 
 /*
  * Gives Hatch a note from *sent on, waiting for room as it goes, then ends
  * the turn. Stops for a press only if `yield`.
  */
-static feed_t feed_rest(const int16_t *pcm, size_t frames, size_t *sent, bool yield)
+static feed_t feed_rest(const int16_t *pcm, size_t frames, size_t *sent, bool yield, uint32_t mic_generation)
 {
     char text[96];
     int64_t moved = esp_timer_get_time();
     for (;;) {
+        if (!mic_current(mic_generation)) return FEED_MUTED;
         muse_hatch_ev_t ev;
         while ((ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
             if (ev == MUSE_HATCH_EV_ERROR) {
@@ -579,6 +690,7 @@ static feed_t feed_rest(const int16_t *pcm, size_t frames, size_t *sent, bool yi
         }
         size_t n = muse_hatch_turn_audio_wait(pcm + *sent, frames - *sent, 100);
         *sent += n;
+        if (!mic_current(mic_generation)) return FEED_MUTED;
         int64_t now = esp_timer_get_time();
         if (n) {
             moved = now;
@@ -587,6 +699,7 @@ static feed_t feed_rest(const int16_t *pcm, size_t frames, size_t *sent, bool yi
             return FEED_FAILED;
         }
     }
+    if (!mic_current(mic_generation)) return FEED_MUTED;
     muse_hatch_turn_end();
     return FED;
 }
@@ -621,6 +734,8 @@ static bool wait_delivered(void)
  */
 static bool send_held(bool quiet)
 {
+    uint32_t mic_generation = muse_settings_mic_generation();
+    if (!mic_current(mic_generation)) return false;
     held_note_t *h = &s_held[0];
     ESP_LOGI(TAG, "sending a saved note%s: %.1fs, from %llds ago, try %d", quiet ? " (asleep)" : "",
              (double)h->frames / MUSE_AUDIO_RATE, (long long)((esp_timer_get_time() - h->at_us) / 1000000),
@@ -631,19 +746,19 @@ static bool send_held(bool quiet)
     }
     muse_hatch_turn_begin();
     size_t sent = 0;
-    feed_t fed = feed_rest(h->pcm, h->frames, &sent, true);
+    feed_t fed = feed_rest(h->pcm, h->frames, &sent, true, mic_generation);
     bool delivered = false, interrupted = false;
     if (fed == FED && quiet) {
         delivered = wait_delivered();
     } else if (fed == FED) {
-        interrupted = hatch_reply(&delivered);
+        interrupted = hatch_reply(&delivered, NULL);
     }
     if (fed != FED || quiet) {
         muse_hatch_turn_cancel();   /* asleep, the reply is left for the app */
     }
-    if (fed == FEED_PRESSED) {
+    if (fed == FEED_PRESSED || fed == FEED_MUTED) {
         if (!quiet) {
-            go_idle("");
+            go_idle(fed == FEED_MUTED ? "MIC OFF" : "");
         }
         return false;
     }
@@ -686,7 +801,7 @@ static bool held_due(void)
     }
     int64_t now = esp_timer_get_time();
     s_waiting = now - s_held[0].at_us < HELD_KEEP_US;
-    bool ready = muse_hatch_ready();
+    bool ready = muse_hatch_ready() && muse_settings_mic_on();
     if (ready && !was_ready) {
         s_next_send_us = 0;
         s_send_backoff_us = RETRY_MIN_US;
@@ -703,6 +818,7 @@ static bool held_due(void)
  */
 static bool finish_note(void)
 {
+    if (!mic_current(s_rec_mic_generation)) goto muted;
     bool delivered;
 #if HOLD_NOTES
     if (s_rec) {
@@ -717,14 +833,15 @@ static bool finish_note(void)
             /* Hatch is behind (still connecting, say): the rest from the kept note. */
             muse_state_set_mode(MUSE_MODE_THINKING);
             muse_state_set_caption("SENDING VOICE NOTE");
-            fed = feed_rest(s_rec, s_rec_n, &s_sent, false) == FED;
+            fed = feed_rest(s_rec, s_rec_n, &s_sent, false, s_rec_mic_generation) == FED;
             if (!fed) {
                 muse_hatch_turn_cancel();
             }
         }
         if (fed) {
-            interrupted = hatch_reply(&delivered);
+            interrupted = hatch_reply(&delivered, NULL);
         }
+        if (!mic_current(s_rec_mic_generation)) goto muted;
         if (delivered || interrupted) {
             drop_rec();
         } else {
@@ -735,7 +852,13 @@ static bool finish_note(void)
 #endif
     muse_hatch_turn_end();   /* before the chirp, which takes ~90 ms */
     muse_audio_chirp(0);
-    return hatch_reply(&delivered);
+    return hatch_reply(&delivered, NULL);
+muted:
+    muse_hatch_turn_cancel();
+    drop_rec();
+    pre_reset();
+    go_idle("MIC OFF");
+    return false;
 }
 
 /*
@@ -744,6 +867,12 @@ static bool finish_note(void)
  */
 static bool can_record(void)
 {
+    s_rec_mic_generation = pre_sync_mic();
+    if (!mic_current(s_rec_mic_generation)) {
+        pre_reset();
+        go_idle("MIC OFF");
+        return false;
+    }
     if (!muse_wifi_connected()) {
         muse_wifi_apply();   /* retry now, not after the backoff */
     }
@@ -777,8 +906,30 @@ static bool can_record(void)
 static void voice_task(void *arg)
 {
     bool pending_down = false;
-    muse_audio_selftest();
+    if (muse_settings_mic_on()) muse_audio_selftest();
     for (;;) {
+#if CONFIG_MUSE_HATCH
+        photo_request_t photo;
+        if (!pending_down && xQueueReceive(s_photos, &photo, 0) == pdTRUE) {
+            set_resting(false);
+            muse_wifi_power(MUSE_WIFI_FULL);
+            if (!muse_chat_photo_turn(photo.jpeg, photo.len)) {
+                free(photo.jpeg);
+                photo_complete(&photo, false, muse_hatch_ready() ? "MUSE IS BUSY" : not_ready_reason());
+            } else {
+                photo.jpeg = NULL;   /* the session task owns and frees the upload */
+                bool delivered;
+                pending_down = hatch_reply(&delivered, &photo);
+                pre_reset();
+                if (!pending_down && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
+                    if (delivered) muse_state_make_happy();
+                    go_idle("");
+                }
+            }
+            atomic_store(&s_photo_busy, false);
+            continue;
+        }
+#endif
         bool wake = false;
         if (!pending_down) {
             muse_input_event_t ev;
@@ -828,7 +979,7 @@ static void voice_task(void *arg)
             }
             if (s_loopback) {
                 s_loopback = false;
-                muse_audio_loopback_test(muse_settings_volume());
+                if (muse_settings_mic_on()) muse_audio_loopback_test(muse_settings_volume());
                 pre_reset();
             }
             /* The 20 ms read paces this loop. */
@@ -878,6 +1029,10 @@ static void voice_task(void *arg)
 esp_err_t muse_voice_start(QueueHandle_t queue)
 {
     s_queue = queue;
+#if CONFIG_MUSE_HATCH
+    s_photos = xQueueCreate(1, sizeof(photo_request_t));
+    if (!s_photos) return ESP_ERR_NO_MEM;
+#endif
     s_pre = heap_caps_malloc(PRE_CHUNKS * sizeof(pre_chunk_t), MUSE_BIG_CAPS);
     if (!s_pre || muse_audio_init(muse_settings_volume(), muse_settings_mic_gain()) != ESP_OK) {
         muse_state_set_mode(MUSE_MODE_ERROR);
@@ -890,6 +1045,34 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+bool muse_voice_send_photo(const uint8_t *jpeg, size_t len, muse_photo_sent_cb_t callback, void *ctx)
+{
+#if CONFIG_MUSE_HATCH
+    if (!s_photos || !callback || !muse_photo_valid(jpeg, len)
+        || !muse_hatch_ready() || muse_state_mode(NULL) != MUSE_MODE_IDLE
+        || atomic_exchange(&s_photo_busy, true)) return false;
+    uint8_t *copy = heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!copy) {
+        atomic_store(&s_photo_busy, false);
+        return false;
+    }
+    memcpy(copy, jpeg, len);
+    photo_request_t photo = {copy, len, callback, ctx};
+    if (xQueueSend(s_photos, &photo, 0) != pdTRUE) {
+        free(copy);
+        atomic_store(&s_photo_busy, false);
+        return false;
+    }
+    muse_state_set_asleep(false);
+    muse_state_poke();
+    muse_state_nudge();
+    return true;
+#else
+    (void)jpeg; (void)len; (void)callback; (void)ctx;
+    return false;
+#endif
 }
 
 void muse_voice_set_monitor(bool on)

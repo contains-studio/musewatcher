@@ -1,3 +1,5 @@
+<!-- Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md. -->
+
 <!--
 Copyright (c) Meta Platforms, Inc. and affiliates.
 
@@ -56,7 +58,7 @@ session to Muse. The rest depends on the hardware.
 | Touch | — | — | — | — | — | ✅ | ✅ | — | ✅ | ✅ | — | — |
 | Battery status | — | — | — | — | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Voltage only |
 | Over-the-air updates | Off | Off | Off | Off | Off | On | On | On | On | On | On | On |
-| Buttons | BOOT | BOOT | Top | Green | Centre (talk), dial | PWR (talk), BOOT | BOOT (talk), PWR | Two | BOOT (talk), PWR | Wheel (press to talk, turn to sleep) | Front (talk), side (menu), PWR | Front (talk), side (menu), PWR |
+| Buttons | BOOT | BOOT | Top | Green | Centre (talk), dial | PWR (talk), BOOT | BOOT (talk), PWR | Two | BOOT (talk), PWR | Wheel (hold to talk, turn to browse) | Front (talk), side (menu), PWR | Front (talk), side (menu), PWR |
 
 Boards without PSRAM (the ideaspark and the Waveshare C6) don't have room for
 the home-network tunnel. Muse can still reach and control them once the
@@ -217,17 +219,44 @@ overlay to testing on hardware.
 Got it working on something new? Share it in the
 [Muse Gadgets Discord](https://discord.gg/3bhjCkZdd6).
 
-### Watcher camera
+### Watcher controls and camera
 
-Camera support is disabled by default. In the Watcher build's `menuconfig`,
-under **Muse**, enable **SenseCAP Watcher camera capture and live preview**
-(`CONFIG_MUSE_WATCHER_CAMERA=y`) and rebuild. It requires PSRAM. Disabled
+The Watcher's idle home shows just Muse. Press and hold the home screen for
+about 0.4 seconds to record a voice message; release to send it. Dragging away
+or leaving home cancels a touch recording. Holding the physical wheel still
+records. A single tap pets Muse, and a touch on a sleeping screen only wakes it.
+Replies appear above a smaller Muse and page through longer text, then home
+returns to the character. The reply layout is the same with sound on or off.
+Turn the wheel during a reply to read backward or forward at your own pace;
+this pauses automatic paging. Press the wheel to finish reading.
+
+While Muse is idle, turn the wheel to browse **Latest card**, **Last reply**,
+and **Back to Muse**, then press to open the selected item. Only available
+items appear. The latest completed image card and last reply stay in memory
+until restart; camera frames and failed image downloads do not replace the
+saved card. The browse hint disappears after ten seconds. A turn on a sleeping
+screen wakes it. Rotation no longer controls phone setup or power.
+
+Swipe left for **Settings** and right to return home. Microphone and speaker
+switches are under **Settings → Sound** and persist across restarts.
+Microphone mute prevents new recordings and monitoring, cancels an in-progress
+recording, and pauses queued voice notes.
+
+Camera support is enabled by the Watcher profile in this fork
+(`CONFIG_MUSE_WATCHER_CAMERA=y`). It requires PSRAM. In `menuconfig`,
+find it under **Muse → SenseCAP Watcher camera capture and live preview**. Disabled
 builds omit the camera worker, shutter UI, double-click gesture, and
 `camera.capture` command.
 
-Double-click the wheel to open a live camera view. Aim the Watcher, then tap
-**TAP TO TAKE PHOTO** or double-click the wheel again. The captured frame stays
-on screen. Tap the image to return to the avatar.
+Double-tap the home screen or double-click the wheel to open a live
+camera view. Aim the Watcher, then tap **Take photo**, tap the image, or
+double-click the wheel again. Review the frozen image and choose **Send photo**
+to send that exact JPEG to Muse, **Retake** to try again, or **×** to discard it.
+You can also turn the wheel to highlight **Take photo / Cancel** in preview,
+or **Send photo / Retake / Cancel** in review, then press the wheel to confirm.
+The screen names the selected action. Turning alone never sends a photo.
+A failed send keeps the photo available to retry. Sending requires a connected
+Muse session; it never uploads a photo just because the preview is open.
 
 The `camera.capture` command returns a JPEG in
 `payload.data_base64`, with `payload.format` set to `jpeg-base64`. During live
@@ -236,4 +265,7 @@ Capture runs asynchronously and reports initialization, timeout, or busy errors.
 The camera uses the existing Himax firmware. It's powered only while a capture
 or the live view runs (a capture takes under a second, start-up included), and
 nothing polls it in between.
-Photo attachments to voice messages are not included.
+Photos are sent as separate Muse messages, with replies shown on the Watcher.
+They are not automatically attached to voice messages. The serial helper
+`python tools/muse/photo.py --port PORT photo.jpg` submits a JPEG through the
+same send path; it does not capture the camera or automatically retry uploads.

@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -39,6 +40,10 @@ void muse_text_to_ascii(char *s, size_t cap);
 
 /* text, or if it needs stand-ins and fits in cap bytes, a copy with them in buf. */
 const char *muse_text_showable(const char *text, char *buf, size_t cap);
+
+/* Word-wrapped pages of already displayable ASCII. Returns the page count;
+ * clamps page to available content. An empty string has zero pages. */
+int muse_text_page(const char *text, int cols, int lines, int page, char *out, size_t cap);
 
 #ifdef __cplusplus
 }

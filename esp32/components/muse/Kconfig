@@ -1,3 +1,4 @@
+# Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -89,6 +90,15 @@ menu "Muse"
             double-click camera preview. Camera buffers and tasks consume
             memory and preview decoding shares CPU time with voice and Link.
             Leave disabled to build without camera support.
+
+    config MUSE_TIME_ZONE
+        string "Avatar time zone (POSIX TZ)"
+        depends on MUSE_ENABLED
+        default "UTC0"
+        help
+            Time zone for the default avatar's morning/day/evening/night scenes.
+            Use a POSIX TZ string, for example PST8PDT,M3.2.0,M11.1.0.
+            The weather scheduler uses its separately configured IANA time zone.
 
     config MUSE_HATCH
         bool "Muse's own voice session"

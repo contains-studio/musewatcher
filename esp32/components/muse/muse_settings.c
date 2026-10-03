@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -17,6 +18,7 @@
 #include "muse_settings.h"
 
 #include <string.h>
+#include <stdatomic.h>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -57,6 +59,8 @@ static struct {
 static SemaphoreHandle_t s_lock;
 static nvs_handle_t s_nvs;
 static muse_setting_cb_t s_listener;
+/* One atomic snapshot: low bit is enabled, upper bits count mic transitions. */
+static atomic_uint s_mic_state = 1;
 
 #define LOCKED(body) do { xSemaphoreTake(s_lock, portMAX_DELAY); body; xSemaphoreGive(s_lock); } while (0)
 
@@ -119,6 +123,7 @@ esp_err_t muse_settings_init(void)
         s.speaker_on = b;
     }
     load_u8("mic_gain", &s.mic_gain);
+    if (nvs_get_u8(s_nvs, "mic_on", &b) == ESP_OK) atomic_store(&s_mic_state, b != 0);
     load_u8("bright", &s.brightness);
     nvs_get_u16(s_nvs, "sleep_s", &s.sleep_s);
     if (nvs_get_u8(s_nvs, "wifi_on", &b) == ESP_OK) {
@@ -149,6 +154,8 @@ void muse_settings_set_listener(muse_setting_cb_t cb)
 
 int muse_settings_volume(void) { return s.volume; }
 bool muse_settings_speaker_on(void) { return s.speaker_on; }
+bool muse_settings_mic_on(void) { return (atomic_load(&s_mic_state) & 1u) != 0; }
+uint32_t muse_settings_mic_generation(void) { return atomic_load(&s_mic_state) >> 1; }
 int muse_settings_mic_gain(void) { return s.mic_gain; }
 int muse_settings_brightness(void) { return s.brightness; }
 int muse_settings_sleep_s(void) { return s.sleep_s; }
@@ -203,6 +210,16 @@ void muse_settings_set_speaker_on(bool on)
     s.speaker_on = on;
     save_u8("speaker", on);
     notify(MUSE_SETTING_SPEAKER);
+}
+
+void muse_settings_set_mic_on(bool on)
+{
+    unsigned old = atomic_load(&s_mic_state);
+    do {
+        if ((old & 1u) == (unsigned)on) return;
+    } while (!atomic_compare_exchange_weak(&s_mic_state, &old, ((old + 2u) & ~1u) | (unsigned)on));
+    notify(MUSE_SETTING_MIC);   /* apply hardware mute before waiting for NVS */
+    save_u8("mic_on", on);
 }
 
 void muse_settings_set_mic_gain(int db)

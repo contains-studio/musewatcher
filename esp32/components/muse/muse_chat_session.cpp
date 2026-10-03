@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -72,6 +73,12 @@ extern "C" {
 #include "muse_wifi.h"
 }
 #include "muse_chat_priv.h"
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+extern "C" {
+#include "muse_ui.h"
+}
+#endif
+#include "muse_photo_upload.h"
 
 #include <xplat/noise/core/ClientSession.h>
 #include <xplat/noise/core/PsaCryptoBackend.h>
@@ -98,7 +105,11 @@ static const char *TAG = "muse_chat_session";
 #define IN_BYTES (MIC_RATE * 2 * 8)        /* 8 s of mic backlog while connecting */
 #define OUT_BYTES (MIC_RATE * 2 * 2)       /* 2 s of decoded reply */
 #define EV_TEXT 72
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+#define TEXT_MAX 8192
+#else
 #define TEXT_MAX 1024                      /* a message's text, for captions timed to its speech */
+#endif
 #define SPEECH_CHARS_PER_S 14              /* until the speech's length is known */
 #define TEXT_CHARS_PER_S 16                /* speaker off: reading pace, a little over speech */
 #define TEXT_HOLD_S 2                      /* speaker off: how long a message's last lines stay up */
@@ -129,12 +140,14 @@ static const char *TAG = "muse_chat_session";
 
 /* ---- Voice task <-> session task ---- */
 
-enum cmd_type_t : uint8_t { CMD_CONNECT, CMD_FORGET, CMD_BEGIN, CMD_END, CMD_CANCEL, CMD_TEXT, CMD_TEXT_CANCEL, CMD_WAKE };
+enum cmd_type_t : uint8_t { CMD_CONNECT, CMD_FORGET, CMD_BEGIN, CMD_END, CMD_CANCEL, CMD_TEXT, CMD_TEXT_CANCEL, CMD_WAKE, CMD_PHOTO };
 
 struct cmd_t {
     cmd_type_t type;
     uint32_t gen;
     char *text;              /* CMD_TEXT: malloc'd, freed by the session task */
+    size_t len = 0;         /* CMD_PHOTO: text owns this many JPEG bytes */
+    uint32_t mic_generation = 0; /* CMD_BEGIN: reject capture predating a mic toggle */
 };
 
 struct ev_t {
@@ -214,6 +227,8 @@ struct turn_t {
     phase_t phase;
     uint32_t gen;
     bool text;               /* typed at the console: the reply goes there, unspoken */
+    uint32_t mic_generation;
+    bool photo;              /* an explicit JPEG upload, with a validated ACK */
     bool end_requested, end_sent, chat_posted, acked;
     int64_t dict_id, chat_id;
     int64_t start_us, end_sent_us, chat_us, last_event_us, last_content_us;
@@ -248,6 +263,7 @@ struct turn_t {
 /* 10 KB, most of it the MP3 decoder: in PSRAM on boards that let static data go
  * there (the AIPI), so Wi-Fi setup and TLS have the internal RAM. */
 EXT_RAM_BSS_ATTR static turn_t s_turn;
+static std::atomic_bool s_turn_active{false};
 
 /* Turn milestones, logged together when the turn ends. */
 enum mark_t : uint8_t { M_RELEASE, M_SENT, M_ACK, M_TEXT, M_DONE, M_TTS, M_MP3, M_AUDIO, M_COUNT };
@@ -299,14 +315,11 @@ static void *json_alloc(size_t n)
 
 /* ---- Events to the voice task ---- */
 
-static void emit(muse_hatch_ev_t type, const char *text)
+static void emit_for(uint32_t gen, muse_hatch_ev_t type, const char *text)
 {
-    if (s_turn.text) {
-        return;   /* typed turns report to the console instead */
-    }
     ev_t ev = {};
     ev.type = type;
-    ev.gen = s_turn.gen;
+    ev.gen = gen;
     if (type == MUSE_HATCH_EV_HEARD) {
         muse_hatch_tail_words(text ? text : "", ev.text, sizeof(ev.text));
     } else if (text) {
@@ -317,6 +330,11 @@ static void emit(muse_hatch_ev_t type, const char *text)
                           ? pdMS_TO_TICKS(200)
                           : 0;
     xQueueSend(s_events, &ev, wait);
+}
+
+static void emit(muse_hatch_ev_t type, const char *text)
+{
+    if (!s_turn.text) emit_for(s_turn.gen, type, text);
 }
 
 /* ---- TLS / WebSocket (from hatch-link's noise_control.cpp) ---- */
@@ -957,6 +975,7 @@ static void turn_finish(void)
     s_turn.tts_msg = -1;
     s_turn.silent = false;
     s_turn.mp3_len = 0;
+    s_turn_active.store(false);
 }
 
 static void turn_fail(const char *why)
@@ -999,6 +1018,7 @@ static bool turn_start(uint32_t gen, bool text)
     s_turn.texts = texts;
     s_turn.gen = gen;
     s_turn.text = text;
+    s_turn_active.store(true);
     s_turn.tts_msg = -1;
     memset(s_marks, 0, sizeof(s_marks));
     s_reply_shown[0] = '\0';
@@ -1011,9 +1031,19 @@ static bool turn_start(uint32_t gen, bool text)
     return true;
 }
 
-static void turn_begin(uint32_t gen)
+static bool voice_mic_current(uint32_t generation)
+{
+    return muse_settings_mic_on() && generation == muse_settings_mic_generation();
+}
+
+static void turn_begin(uint32_t gen, uint32_t mic_generation)
 {
     if (!turn_start(gen, false)) {
+        return;
+    }
+    s_turn.mic_generation = mic_generation;
+    if (!voice_mic_current(mic_generation)) {
+        turn_fail("MIC OFF");
         return;
     }
     if (VOICE_NOTE) {
@@ -1043,6 +1073,10 @@ static bool pump_mic(void)
     static int16_t up[MIC_RATE / 50 * DICT_RATE / MIC_RATE + 4];
     bool did = false;
     for (;;) {
+        if (!voice_mic_current(s_turn.mic_generation)) {
+            turn_fail("MIC OFF");
+            return true;
+        }
         /* Never run more than a second ahead of real time: the ASR upstream drops floods. */
         double elapsed = (now_us() - s_turn.start_us) / 1e6;
         if ((s_turn.sent24 + DICT_CHUNK_BYTES / 2) / (double)DICT_RATE > 1.0 + 1.5 * elapsed) {
@@ -1063,6 +1097,10 @@ static bool pump_mic(void)
             p += take;
             bytes -= take;
             if (s_turn.chunk_len == DICT_CHUNK_BYTES) {
+                if (!voice_mic_current(s_turn.mic_generation)) {
+                    turn_fail("MIC OFF");
+                    return true;
+                }
                 if (!send_body(s_turn.dict_id, s_turn.chunk, DICT_CHUNK_BYTES, false)) {
                     return false;
                 }
@@ -1072,6 +1110,10 @@ static bool pump_mic(void)
         }
     }
     if (s_turn.end_requested && !s_turn.end_sent) {
+        if (!voice_mic_current(s_turn.mic_generation)) {
+            turn_fail("MIC OFF");
+            return true;
+        }
         if (s_turn.chunk_len && !send_body(s_turn.dict_id, s_turn.chunk, s_turn.chunk_len, false)) {
             return false;
         }
@@ -1093,6 +1135,7 @@ static bool pump_mic(void)
 /* Base64-encodes the staged PCM into one body chunk; `last` pads and closes the request. */
 static bool send_note_part(bool last)
 {
+    if (!voice_mic_current(s_turn.mic_generation)) return false;
     char *o = reinterpret_cast<char *>(s_turn.chunk);
     o += muse_hatch_base64(s_turn.note, s_turn.note_len, o);
     if (last) {
@@ -1130,6 +1173,10 @@ static bool open_note(void)
 static bool record_note(void)
 {
     for (;;) {
+        if (!voice_mic_current(s_turn.mic_generation)) {
+            turn_fail("MIC OFF");
+            return true;
+        }
         size_t room = NOTE_PART_BYTES - s_turn.note_len;
         size_t left = NOTE_MAX_BYTES - s_turn.pcm_bytes;
         room = (room < left ? room : left) & ~(size_t)1;
@@ -1229,6 +1276,38 @@ static void text_begin(const char *text)
     }
 }
 
+static bool photo_write(const uint8_t *data, size_t len, bool last, void *ctx)
+{
+    (void)ctx;
+    if (s_turn.gen != s_gen.load()) return false;
+    s_turn.body_sent += len;
+    return send_body(s_turn.chat_id, data, len, last);
+}
+
+/* Called only by the session task; the command owns JPEG until this returns. */
+static void photo_begin(uint32_t gen, const uint8_t *jpeg, size_t len)
+{
+    if (s_turn.phase != P_IDLE) {
+        emit_for(gen, MUSE_HATCH_EV_ERROR, "MUSE IS BUSY");
+        return;
+    }
+    if (!turn_start(gen, false)) return;
+    s_turn.photo = true;
+    s_turn.chat_id = open_stream(K_CHAT, "POST", "/chat/stream", "application/json", nullptr, nullptr, false);
+    bool ok = s_turn.chat_id && muse_photo_write_json(jpeg, len,
+        reinterpret_cast<char *>(s_turn.chunk), DICT_CHUNK_BYTES,
+        muse_hatch_base64, photo_write, nullptr);
+    if (!ok) {
+        turn_fail(gen == s_gen.load() ? "PHOTO SEND NOT CONFIRMED" : "PHOTO SEND CANCELLED");
+        return;
+    }
+    mark(M_SENT);
+    s_turn.chat_posted = true;
+    s_turn.chat_us = s_turn.last_event_us = now_us();
+    s_turn.phase = P_WAIT_REPLY;
+    ESP_LOGI(TAG, "photo: %u JPEG bytes, %u byte request", (unsigned)len, (unsigned)s_turn.body_sent);
+}
+
 static void on_dictation_line(cJSON *line)
 {
     const char *type = cJSON_GetStringValue(cJSON_GetObjectItem(line, "type"));
@@ -1294,6 +1373,9 @@ static bool is_user_id(const char *id)
 /* The message `id` if it belongs to this turn, binding it on first sight; else -1. */
 static int bind_msg(const char *id, cJSON *payload)
 {
+    /* Before this upload's ACK, a subscription reply may belong to another
+     * client. Never release the retained photo on that unrelated event. */
+    if (s_turn.photo && !s_turn.acked) return -1;
     int i = find_msg(id);
     if (i >= 0 || s_turn.phase != P_WAIT_REPLY) {
         return i;
@@ -1324,6 +1406,9 @@ static void append_text(msg_t &m, const char *text)
             full[0] = '\0';
         }
         strlcat(full, text, TEXT_MAX);
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+        if (!s_turn.text) muse_ui_reply_update(m.id, full);
+#endif
     }
     m.len += add;
     size_t have = strlen(m.tail);
@@ -1381,6 +1466,9 @@ static void message_done(int i, const char *final_text)
     if (!m.len && final_text && final_text[0]) {
         append_text(m, final_text);
     }
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    if (final_text && final_text[0]) muse_ui_reply_update(m.id, final_text);
+#endif
     if (m.len && m.tts == TTS_NONE) {
         m.tts = TTS_QUEUED;
     }
@@ -1482,6 +1570,13 @@ static void on_chat_ack(stream_t *s)
         if (id) {
             strlcpy(s_turn.user_ids[k], id, sizeof(s_turn.user_ids[k]));
         }
+    }
+    if (s_turn.photo && (!cJSON_IsObject(obj) || cJSON_GetObjectItem(obj, "error")
+        || cJSON_IsFalse(cJSON_GetObjectItem(obj, "accepted"))
+        || (!s_turn.user_ids[0][0] && !cJSON_IsTrue(cJSON_GetObjectItem(obj, "accepted"))))) {
+        cJSON_Delete(root);
+        turn_fail("PHOTO SEND NOT CONFIRMED");
+        return;
     }
     s_turn.acked = true;
     mark(M_ACK);
@@ -1892,7 +1987,7 @@ static void handle(const cmd_t &cmd)
         break;
     case CMD_BEGIN:
         if (cmd.gen == s_gen.load()) {
-            turn_begin(cmd.gen);
+            turn_begin(cmd.gen, cmd.mic_generation);
         }
         break;
     case CMD_END:
@@ -1918,6 +2013,12 @@ static void handle(const cmd_t &cmd)
         if (s_turn.text && s_turn.phase != P_IDLE) {
             turn_fail("CANCELLED");
         }
+        break;
+    case CMD_PHOTO:
+        if (cmd.gen == s_gen.load()) {
+            photo_begin(cmd.gen, reinterpret_cast<const uint8_t *>(cmd.text), cmd.len);
+        }
+        free(cmd.text);
         break;
     case CMD_WAKE:   /* only ends hatch_task's resting wait */
         break;
@@ -2001,10 +2102,11 @@ static void hatch_task(void *arg)
 
 /* ---- Public API ---- */
 
-static void post(cmd_type_t type, uint32_t gen)
+static void post(cmd_type_t type, uint32_t gen, uint32_t mic_generation = 0)
 {
     if (s_cmds) {
         cmd_t cmd{ type, gen, nullptr };
+        cmd.mic_generation = mic_generation;
         xQueueSend(s_cmds, &cmd, pdMS_TO_TICKS(100));
     }
 }
@@ -2063,14 +2165,25 @@ extern "C" bool muse_hatch_ready(void)
 
 extern "C" void muse_hatch_turn_begin(void)
 {
+    uint32_t mic_generation = muse_settings_mic_generation();
     uint32_t gen = ++s_gen;
     xStreamBufferReset(s_in);
     drain_out();
-    post(CMD_BEGIN, gen);
+    post(CMD_BEGIN, gen, mic_generation);
+}
+
+extern "C" bool muse_chat_photo_turn(uint8_t *jpeg, size_t len)
+{
+    if (!muse_hatch_ready() || !muse_photo_valid(jpeg, len) || s_turn_active.load()) return false;
+    uint32_t gen = ++s_gen;
+    drain_out();
+    cmd_t cmd{CMD_PHOTO, gen, reinterpret_cast<char *>(jpeg), len};
+    return xQueueSend(s_cmds, &cmd, 0) == pdTRUE;
 }
 
 extern "C" void muse_hatch_turn_audio(const int16_t *pcm, size_t frames)
 {
+    if (!muse_settings_mic_on()) return;
     size_t bytes = frames * sizeof(int16_t);
     if (xStreamBufferSend(s_in, pcm, bytes, 0) != bytes) {
         ESP_LOGW(TAG, "mic backlog full, dropped audio");
@@ -2080,6 +2193,7 @@ extern "C" void muse_hatch_turn_audio(const int16_t *pcm, size_t frames)
 /* Both ends move whole frames, so the buffer never splits one. */
 extern "C" size_t muse_hatch_turn_audio_wait(const int16_t *pcm, size_t frames, int wait_ms)
 {
+    if (!muse_settings_mic_on()) return 0;
     return xStreamBufferSend(s_in, pcm, frames * sizeof(int16_t), pdMS_TO_TICKS(wait_ms)) / sizeof(int16_t);
 }
 

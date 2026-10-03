@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -19,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_app_desc.h"
 #include "esp_log.h"
@@ -95,14 +97,15 @@ static int build_status(char *out, size_t len)
                     "\"wifi\":{\"on\":%s,\"state\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d},"
                     "\"hatch\":{\"host\":\"%s\",\"vm\":\"%s\",\"token\":%s,\"state\":\"%s\"},"
                     "\"link\":{\"paired\":%s,\"state\":\"%s\"},"
-                    "\"volume\":%d,\"speaker\":%s,\"mic_gain\":%d,\"brightness\":%d,\"sleep\":%d,\"last\":\"%s\"}",
+                    "\"volume\":%d,\"speaker\":%s,\"mic\":%s,\"mic_gain\":%d,\"brightness\":%d,\"sleep\":%d,\"clock\":%lld,\"last\":\"%s\"}",
                     s_name, esp_app_get_description()->version, p.battery_pct,
                     muse_settings_wifi_on() ? "true" : "false", wifi_state_name(w.state), ssid_e, w.ip, w.rssi,
                     host_e, vm_e, muse_settings_hatch_token_len() ? "true" : "false", muse_hatch_state_name(h.state),
                     muse_link_hatch_linked() ? "true" : "false", muse_link_state_name(muse_link_state()),
                     muse_settings_volume(), muse_settings_speaker_on() ? "true" : "false",
+                    muse_settings_mic_on() ? "true" : "false",
                     muse_settings_mic_gain(), muse_settings_brightness(),
-                    muse_settings_sleep_s(), last_e);
+                    muse_settings_sleep_s(), (long long)time(NULL), last_e);
 }
 
 static bool parse_int(const char *v, int lo, int hi, int *out)
@@ -165,6 +168,8 @@ static void run_command(char *cmd)
         muse_settings_set_volume(n);
     } else if (!strcmp(cmd, "speaker") && parse_int(v, 0, 1, &n)) {
         muse_settings_set_speaker_on(n);
+    } else if (!strcmp(cmd, "mic") && parse_int(v, 0, 1, &n)) {
+        muse_settings_set_mic_on(n);
     } else if (!strcmp(cmd, "mic_gain") && parse_int(v, 0, MUSE_MIC_GAIN_MAX, &n)) {
         muse_settings_set_mic_gain(n);
     } else if (!strcmp(cmd, "brightness") && parse_int(v, 10, 100, &n)) {

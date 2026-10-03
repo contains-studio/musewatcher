@@ -1,3 +1,4 @@
+# Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -67,3 +68,7 @@ CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
 # actually slept, and how long each power lock kept the chip awake.
 CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
 CONFIG_PM_PROFILING=y
+
+# Muse Watcher: camera/review workflow and USB display captures.
+CONFIG_MUSE_WATCHER_CAMERA=y
+CONFIG_LV_USE_SNAPSHOT=y

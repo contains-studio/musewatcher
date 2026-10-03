@@ -1,72 +1,133 @@
-<!--
-Copyright (c) Meta Platforms, Inc. and affiliates.
+# Muse Watcher
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+A weather-aware Muse companion for the **Seeed SenseCAP Watcher**. Hold to send a voice message, double-tap to take a photo, read Muse's replies on the screen, and give the character an outfit that matches the weather.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
--->
-
-# Muse Gadgets
+A community fork of [Meta's Muse Gadget SDK](https://github.com/facebookincubator/muse-gadget-sdk), with a quieter home screen, useful wheel navigation, camera review, and thirteen animated weather outfits. It uses the Muse app and your own [Gadget SDK token](https://gadgets.muse.ai/settings/sdk-tokens).
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/images/muse-gadgets-dark.png">
-    <img src=".github/images/muse-gadgets-light.png" width="900" alt="Muse gadgets: a Waveshare round AMOLED, an M5Stack StickS3, Muse Home Link, a Raspberry Pi and a Seeed reTerminal e-ink display">
-  </picture>
+  <img src="docs/media/device-weather-card.png" width="250" alt="Actual Watcher weather card with temperature above a furry Muse wearing shorts">
+  <img src="docs/media/tap-reaction.gif" width="250" alt="Pixel Muse raises its arms, smiles, bounces with hearts, then returns to idle">
 </p>
 
-Muse gadgets are open source devices you build yourself. Program an
-off-the-shelf ESP32 board or set up a Raspberry Pi with our device SDKs, then
-connect Muse to your displays, buttons, sensors, actuators, and whatever else
-you've got lying on your workbench.
+*Left: a USB capture of a weather card on the Watcher, with historical example values. Right: the production animation renderer with a simulated tap. [Media details and videos](docs/media/README.md).*
 
-We open sourced the SDKs and firmware here. It's built by hackers, for hackers,
-just for fun. Side effects of tinkering may include bricked boards, voided
-warranties, brownouts, or bankruptcies. Proceed at your own risk!
+## What it does
 
-| | |
-|---|---|
-| [**ESP32 Device SDK**](esp32) | Connect your ESP32 board to Muse through our open source SDK. Throw in a screen to show images, add audio in and out, or wire up other sensors. |
-| [**Linux Device SDK**](linux) | Turn that spare Raspberry Pi or Linux box into a Muse gadget. Hack in your own commands to let Muse handle sysadmin chores or your Home Assistant setup. |
+- **A clean home:** Muse sits low on the screen, with sparse pixel weather effects. Settings live on the second screen.
+- **Voice messages:** hold the home screen or wheel to record; release to send. Text replies appear above Muse and page automatically, including when sound is off.
+- **Photos with a preview:** double-tap to open the camera, take a photo, then choose Send, Retake, or Cancel. Opening the camera does not send anything.
+- **A useful wheel:** page through replies, recall the latest image card, and select camera actions.
+- **Weather outfits:** thirteen looks selected by current conditions and feels-like temperature. The saved outfit stays on Muse after the card closes and across restarts.
+- **A real tap reaction:** every outfit has happy eyes, a grin, raised arms, hops, and hearts, then returns to idle after about 1.6 seconds. Fur and clothing stay intact.
+- **A gentler desk companion:** the harsh RGB indicator is switched off at startup. Microphone and speaker switches are in Settings → Sound.
 
-Before you flash or pair a gadget, get an
-[SDK token](https://gadgets.muse.ai/settings/sdk-tokens) and review the
-[Gadget SDK Terms](https://gadgets.muse.ai/sdk-terms). Every gadget needs a
-token to pair.
+Replies are text in this SDK. Automatic spoken replies require a separate text-to-speech integration; the speaker switch alone does not add one. Latest reply/card history lasts until restart. The selected outfit and sound settings are saved persistently.
 
-ESP32 and Linux gadgets pair with the Muse app on iOS and Android, via
-Settings > Devices. Turn on Developer mode there first, then look for devices
-prefixed with "MuseGadget".
-Each directory has a `README.md` to get started and an `AGENTS.md` for coding
-agents like [Muse Code](https://developer.meta.com/ai/lp/muse-code/).
+## Build your own
 
-## Community
+You need a **SenseCAP Watcher**, a USB data cable, a macOS or Linux computer, the Muse phone app, and an SDK token. The Watcher's bottom USB-C port is enough; no separate programmer or JTAG adapter is required.
 
-Meet other hackers who are building and customizing Muse gadgets in our
-community [Discord](https://discord.gg/3bhjCkZdd6). Get inspired, support each
-other, and share what you make.
+Follow the [complete setup and flashing guide](docs/setup.md) to install **ESP-IDF 6.0.1** and identify the correct serial port. After activating that toolchain:
 
-## License
+```sh
+git clone https://github.com/contains-studio/musewatcher.git
+cd musewatcher/esp32
 
-Muse Gadgets is licensed under the Apache License, Version 2.0, found in
-[`LICENSE`](LICENSE), except for these third-party files, which keep their
-upstream licenses:
+python tools/watcher.py ports
+# Replace PORT with the Watcher's ESP32-S3 serial interface.
+python tools/watcher.py backup --port PORT --output ~/watcher-backup
+python tools/watcher.py configure
+python tools/watcher.py build
+python tools/watcher.py flash --port PORT
+python tools/watcher.py status --port PORT
+```
 
-| Path | Upstream | License |
+`configure` accepts the SDK token through a hidden terminal prompt. It stays in the ignored build directory. Pair the Watcher in **Muse → Settings → Devices** with Developer mode enabled, then complete Wi-Fi setup and the on-device confirmation.
+
+**Back up before the first flash.** Muse's partition layout overlaps the Watcher's unique factory data. The helper saves that factory region; add `--full` for a complete 32 MiB backup. Keep backups, generated configs, and firmware binaries private: they can contain device identity or credentials.
+
+**Use the paced flashing helper.** The Watcher's CH342 bridge drops unpaced writes. Reducing the baud rate in ordinary esptool is not the same fix. The helper sends small chunks at 115200 baud and preserves Muse's pairing/Wi-Fi settings during normal updates.
+
+The profile enables the camera and USB screenshots, and includes the required sprite data. No ignored local artwork or manually edited build config is needed. The procedural default avatar's day/night scenes use a configurable POSIX time zone; see the setup guide. Weather scheduling uses a separate IANA time zone in Muse.
+
+## Controls
+
+| Where | Action | Result |
 |---|---|---|
-| [`esp32/components/minimp3/include/minimp3.h`](esp32/components/minimp3) | [lieff/minimp3](https://github.com/lieff/minimp3) | CC0-1.0, see [`LICENSE`](esp32/components/minimp3/LICENSE) |
-| [`esp32/main/pixel_font.c`](esp32/main/pixel_font.c) | Adafruit GFX `glcdfont.c` | BSD-2-Clause, in the file header |
+| Home | Tap once | Pet Muse and trigger the excited animation |
+| Home | Hold the screen or wheel | Record; release to send a voice message |
+| Home | Double-tap / double-click the wheel | Open camera preview |
+| Home | Turn the wheel | Browse Latest card, Last reply, and Back to Muse |
+| Reply | Turn the wheel | Read backward/forward and pause automatic paging |
+| Reply/card | Press the wheel | Return to Muse |
+| Camera | Take photo, then Send / Retake / Cancel | Review the exact frame before sending |
+| Camera | Turn, then press the wheel | Select and confirm the displayed action |
+| Home | Swipe left | Open Settings; swipe right to return |
+| Sleeping | Touch or turn the wheel | Wake; the first gesture is consumed |
 
-Dependencies fetched at build time are under their own licenses: ESP-IDF
-components (into `esp32/managed_components/`), and the simulator's LVGL and
-SDL (listed in [`esp32/simulator/THIRD_PARTY.md`](esp32/simulator/THIRD_PARTY.md)).
+Dragging away cancels a touch recording. Muting the microphone cancels an active recording and prevents new ones. Photos and voice notes are separate messages.
 
-The Apache License does not cover the [Jollybot avatar](esp32/avatar).
+## Weather images and animations
+
+<p align="center"><img src="docs/media/weather-effects.png" width="660" alt="Production renderer previews of sunny, rainy, snowy, and windy pixel scenes"></p>
+
+*Host previews with simulated animation time. The firmware chooses scenery from the saved outfit; it does not fetch weather by itself.*
+
+All **13 original PNGs**, the selection rules, generated RGB565 sprites, and animation source are included:
+
+- [Downloadable artwork and catalog](assets/weather/)
+- [Every outfit: idle and excited](docs/media/outfit-reactions.png)
+- [Reuse, render, and customize the assets](docs/assets.md)
+- [Weather and tap animation source](esp32/components/muse/muse_wardrobe.c)
+
+Rain, snow, and ice take precedence over dry-weather outfits. Known dry weather at **24°C / 75.2°F or warmer** uses shorts and sandals with the character's cream fur intact. Feels-like temperature takes priority over current temperature; missing values are omitted. See the complete [ordered weather rules](assets/weather/weather-rules.json).
+
+Render a card locally, without fetching weather or contacting a device:
+
+```sh
+# Run from the repository root, in a Python environment with Pillow.
+python -m pip install -r requirements-art.txt
+python tools/weather_card.py examples/weather.json --output /tmp/weather-card.jpg
+```
+
+This produces a 412×412 baseline JPEG and prints the selected outfit ID. The [included example](examples/weather-card.jpg) uses synthetic weather values. Cards put information at the top and Muse at the bottom, with no date, location, condition label, or source line on the display. Keep weather provenance in the delivery record.
+
+The project permits reuse of its own weather additions under Apache 2.0 to the extent it controls them. **The upstream character is excluded from the SDK's Apache license.** Keep the [artwork notice](assets/weather/NOTICE.md) with copies; this fork does not grant additional rights to Meta's character.
+
+## A daily report at 7 a.m.
+
+Give Muse the [weather-display skill](skills/muse-weather-display/SKILL.md) and access to this checkout's tools and assets. Configure **your location, command device ID, and IANA time zone**. The command ID can differ from the friendly device name in the app; discover it instead of copying an example.
+
+The workflow fetches fresh weather, selects an outfit, renders and uploads a card, then sends these commands to that device:
+
+```text
+display.set_outfit {"outfit_id":"<selected outfit ID>"}
+display.show_animation {}
+display.draw_url {"url":"<uploaded JPEG URL>"}
+```
+
+Run one manual delivery and inspect the Watcher before scheduling **07:00 in your time zone**. Reuse a matching existing job, approve the required upload through Muse, and verify the stored schedule. Keep the Watcher powered and connected; battery sleep can interrupt delivery. A local render or a command timeout does not prove that the card reached the screen.
+
+This repo supplies the firmware, artwork, renderer, and skill. Your Muse environment supplies weather access, storage/upload permissions, and scheduling. Cloning the repo does not create a daily job.
+
+## Development and lessons learned
+
+Read [the engineering notes](docs/learnings.md) for the problems behind the implementation: paced USB writes, camera frame sizes, memory placement, gesture timing, preserving cards during camera use, outfit persistence, and testing a character's face rather than just background hearts.
+
+After a firmware build has fetched managed dependencies:
+
+```sh
+cd esp32
+python -m unittest discover -s tests -p 'test_*.py'
+cd ..
+python -m unittest discover -s skills/muse-weather-display/scripts -p 'test_*.py'
+python -m unittest discover -s tests -p 'test_*.py'
+```
+
+The [UI simulator](esp32/simulator/) exercises touch and wheel flows. The [wardrobe preview tool](esp32/tools/muse/wardrobe_preview.py) compiles the production renderer and exports GIFs with `--reaction`. A USB capture uses `python tools/watcher.py screenshot --port PORT --output /tmp/watcher.png` from `esp32/`; transferring it briefly pauses drawing.
+
+The default branch is **`watcher`**, built from the hardware-tested upstream revision [`b9008ab`](https://github.com/facebookincubator/muse-gadget-sdk/commit/b9008abba7dc4109c66212b9b82e459d08b98b85). The fork retains upstream history and its `main` branch. Other SDK targets remain available, but hardware checks here focus on the Watcher. See [changes in this fork](CHANGES.md) and the [original SDK overview](docs/upstream-sdk.md).
+
+## License and attribution
+
+Firmware and project-authored code are under [Apache 2.0](LICENSE), with the upstream notices preserved. The Muse/Jollybot artwork is excluded as described above. Third-party components retain their licenses: [minimp3](esp32/components/minimp3/LICENSE), the BSD-2-Clause header in [pixel_font.c](esp32/main/pixel_font.c), and the [simulator dependencies](esp32/simulator/THIRD_PARTY.md). This is a community project, not an official Meta or Seeed product.

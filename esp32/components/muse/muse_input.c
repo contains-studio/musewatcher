@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -17,6 +18,7 @@
 #include "muse_input.h"
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +26,9 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "sdkconfig.h"
 #if CONFIG_PM_ENABLE
 #include "esp_pm.h"
@@ -39,12 +43,19 @@
 #include "muse_mem.h"
 #include "muse_menu.h"
 #include "muse_settings.h"
+#include "muse_serial_photo.h"
 #include "muse_state.h"
 #include "muse_ui.h"
 #include "muse_voice.h"
 #include "muse_wifi.h"
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+#include "muse_ptt_sources.h"
+#include "muse_wardrobe.h"
+#include "muse_wardrobe_settings.h"
+#endif
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
+#include "muse_wheel_gesture.h"
 #endif
 
 static const char *TAG = "muse_input";
@@ -74,12 +85,96 @@ static bool s_cpu_low;      /* display stopped and the CPU allowed to sleep */
 static volatile bool s_power_off_requested;
 static volatile bool s_nap_now;   /* ">nap": asleep, as if on battery, nap without waiting WIFI_NAP_MS */
 
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+#define PTT_EDGE_COUNT 16
+
+typedef struct {
+    unsigned source;
+    muse_ptt_t type;
+    bool wake;
+} ptt_edge_t;
+
+static QueueHandle_t s_ptt_edges;
+static atomic_bool s_ptt_overflow;
+static muse_ptt_sources_t s_ptt_sources;
+
+/* One ordered queue for every producer. In particular, touch DOWN queued
+ * before this poll's wheel UP keeps the combined hold continuous. */
+static void post_source(unsigned source, muse_ptt_t type, bool wake)
+{
+    if (!s_ptt_edges) return;   /* input has not started yet */
+    ptt_edge_t edge = { .source = source, .type = type, .wake = wake };
+    if (xQueueSend(s_ptt_edges, &edge, 0) != pdTRUE) atomic_store(&s_ptt_overflow, true);
+}
+#endif
+
+void muse_input_touch(muse_ptt_t type)
+{
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    /* No queue wait, display lock or voice call on the LVGL thread. */
+    post_source(MUSE_PTT_TOUCH, type, false);
+#else
+    (void)type;
+#endif
+}
+
 static void post(muse_ptt_t type, bool wake)
 {
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    post_source(MUSE_PTT_WHEEL, type, wake);
+#else
     muse_input_event_t ev = { .type = type, .wake = wake };
     ESP_LOGI(TAG, "PTT %s%s", type == MUSE_PTT_DOWN ? "down" : "up", wake ? " (waking)" : "");
     xQueueSend(s_queue, &ev, 0);
+#endif
 }
+
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+/* Retry an undelivered edge before consuming another input edge. This keeps
+ * DOWN/UP and CANCEL/DOWN pairs intact even when voice is briefly busy. */
+static bool flush_ptt(void)
+{
+    unsigned action;
+    while ((action = muse_ptt_source_next(&s_ptt_sources)) != MUSE_PTT_ACTION_NONE) {
+        muse_input_event_t ev = {
+            .type = action == MUSE_PTT_ACTION_DOWN ? MUSE_PTT_DOWN
+                  : action == MUSE_PTT_ACTION_CANCEL ? MUSE_PTT_CANCEL : MUSE_PTT_UP,
+            .wake = action == MUSE_PTT_ACTION_DOWN && s_ptt_sources.wake,
+        };
+        if (xQueueSend(s_queue, &ev, 0) != pdTRUE) return false;
+        muse_ptt_source_commit(&s_ptt_sources, action);
+        ESP_LOGI(TAG, "PTT %s%s", ev.type == MUSE_PTT_DOWN ? "down"
+                 : ev.type == MUSE_PTT_CANCEL ? "cancel" : "up", ev.wake ? " (waking)" : "");
+    }
+    return true;
+}
+
+static void poll_touch(void)
+{
+    if (atomic_exchange(&s_ptt_overflow, false)) {
+        /* Lost input order cannot safely complete a note. Discard pending
+         * edges and cancel any recording whose DOWN reached the voice queue. */
+        xQueueReset(s_ptt_edges);
+        s_ptt_sources.held = 0;
+        s_ptt_sources.ending = s_ptt_sources.cancelled = s_ptt_sources.sent;
+        ESP_LOGW(TAG, "PTT input overflow: cancelling recording");
+    }
+    bool blocked = muse_state_asleep();
+#if CONFIG_MUSE_WATCHER_CAMERA
+    blocked |= watcher_camera_state() != WATCHER_CAMERA_CLOSED;
+#endif
+    if (blocked) muse_ptt_source_set(&s_ptt_sources, MUSE_PTT_TOUCH, false, true, false);
+    if (!flush_ptt()) return;
+    ptt_edge_t edge;
+    /* Bound this poll's work even if another task is producing edges. */
+    for (unsigned i = 0; i < PTT_EDGE_COUNT && xQueueReceive(s_ptt_edges, &edge, 0) == pdTRUE; i++) {
+        if (blocked && edge.source == MUSE_PTT_TOUCH) edge.type = MUSE_PTT_CANCEL;
+        muse_ptt_source_set(&s_ptt_sources, edge.source, edge.type == MUSE_PTT_DOWN,
+                            edge.type == MUSE_PTT_CANCEL, edge.wake);
+        if (!flush_ptt()) return;
+    }
+}
+#endif
 
 static bool update_power(void);
 
@@ -141,6 +236,15 @@ static void aux_button(bool pressed, bool edge)
     static bool hinted;
     static int sleep_in;    /* ticks until a pending single press sleeps */
     static char saved_caption[64];
+
+#if CONFIG_MUSE_WATCHER_CAMERA
+    if (watcher_camera_state() != WATCHER_CAMERA_CLOSED) {
+        held = sleep_in = 0;
+        hinted = false;
+        swallow = pressed;
+        return;
+    }
+#endif
 
     if (sleep_in && --sleep_in == 0) {
         set_asleep(true, muse_board->aux_button);
@@ -211,24 +315,41 @@ static void talk_button(unsigned ev)
     bool talk_down = s_talk_down;
     static bool swallow;
 #if CONFIG_MUSE_WATCHER_CAMERA
-    static TickType_t last_release;
-    if ((ev & MUSE_BTN_TALK_PRESS) && !muse_state_asleep()
-        && !muse_menu_is_open() && last_release
-        && xTaskGetTickCount() - last_release <= pdMS_TO_TICKS(350)) {
-        ESP_LOGI(TAG, "wheel double-click: camera preview/shutter");
-        last_release = 0;
-        watcher_camera_preview_toggle();
-        swallow = true;
-        return;
+    static muse_wheel_gesture_t wheel;
+    static bool bypass_until_release;
+    bool camera = watcher_camera_state() != WATCHER_CAMERA_CLOSED;
+    bool special = !camera && (muse_state_asleep() || muse_menu_is_open()
+                               || muse_link_state() == MUSE_LINK_CONFIRM);
+    if (special || (bypass_until_release && !camera)) {
+        /* Waking, menu selection and pairing stay immediate; finish that
+         * physical press on the same path even after its action changes mode. */
+        bool held = wheel.down || talk_down || bypass_until_release;
+        wheel = (muse_wheel_gesture_t){0};
+        if (ev & MUSE_BTN_TALK_PRESS) held = true;
+        if (ev & MUSE_BTN_TALK_RELEASE) held = false;
+        bypass_until_release = held;
+    } else {
+        bypass_until_release = false;
+        if (ev) muse_state_poke();
+        unsigned edges = ((ev & MUSE_BTN_TALK_PRESS) ? MUSE_WHEEL_DOWN : 0)
+                         | ((ev & MUSE_BTN_TALK_RELEASE) ? MUSE_WHEEL_UP : 0)
+                         | ((ev & (MUSE_BTN_WHEEL_PREV | MUSE_BTN_WHEEL_NEXT)) ? MUSE_WHEEL_TURN : 0);
+        unsigned action = muse_wheel_step(&wheel, edges,
+                                           (uint32_t)(esp_timer_get_time() / 1000), camera);
+        if (action & MUSE_WHEEL_CAMERA) {
+            ESP_LOGI(TAG, "wheel double-click: camera preview/shutter");
+            watcher_camera_preview_toggle();
+        }
+        if (action & MUSE_WHEEL_TAP) muse_ui_wheel_click();
+        ev = ((action & MUSE_WHEEL_DOWN) ? MUSE_BTN_TALK_PRESS : 0)
+             | ((action & MUSE_WHEEL_UP) ? MUSE_BTN_TALK_RELEASE : 0);
+        if (camera && talk_down) ev |= MUSE_BTN_TALK_RELEASE;
     }
 #endif
 
     /* A quick tap can latch press and release in the same poll, and a release
      * can land just before the next press; keep them ordered. */
     bool released = ev & MUSE_BTN_TALK_RELEASE;
-#if CONFIG_MUSE_WATCHER_CAMERA
-    bool saw_release = released;
-#endif
     if ((talk_down || swallow) && released) {
         if (talk_down) {
             post(MUSE_PTT_UP, false);
@@ -260,17 +381,15 @@ static void talk_button(unsigned ev)
         }
         talk_down = swallow = false;
     }
-#if CONFIG_MUSE_WATCHER_CAMERA
-    if (saw_release && !swallow) {
-        last_release = xTaskGetTickCount();
-    }
-#endif
     s_talk_down = talk_down;
 }
 
 /* A pairing prompt wakes the screen and keeps it on; otherwise idle sleeps. */
 static void check_sleep(void)
 {
+#if CONFIG_MUSE_WATCHER_CAMERA
+    if (watcher_camera_state() != WATCHER_CAMERA_CLOSED) return;
+#endif
     muse_ble_status_t ble;
     muse_ble_status(&ble);
     bool prompt = ble.passkey || muse_link_state() == MUSE_LINK_CONFIRM;
@@ -378,8 +497,19 @@ static void input_task(void *arg)
         if (ev & (MUSE_BTN_TALK_PRESS | MUSE_BTN_TALK_RELEASE)) {
             ESP_LOGI(TAG, "talk key:%s%s", ev & MUSE_BTN_TALK_PRESS ? " press" : "",
                      ev & MUSE_BTN_TALK_RELEASE ? " release" : "");
-            talk_button(ev);
         }
+#if CONFIG_MUSE_WATCHER_CAMERA
+        if (ev & (MUSE_BTN_WHEEL_PREV | MUSE_BTN_WHEEL_NEXT)) {
+            if (muse_state_asleep()) set_asleep(false, "wheel turn");
+            else muse_ui_wheel_turn(ev & MUSE_BTN_WHEEL_NEXT ? 1 : -1);
+        }
+        talk_button(ev);  /* the held-wheel deadline also advances without an edge */
+#else
+        if (ev & (MUSE_BTN_TALK_PRESS | MUSE_BTN_TALK_RELEASE)) talk_button(ev);
+#endif
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+        poll_touch();
+#endif
         /* A latched key (the 1.75's PMU) can report press and release in the
          * same poll, and a release can land just before the next press; keep
          * them ordered, as talk_button does. */
@@ -500,6 +630,106 @@ static void chat_cancel(void)
     s_chat = NULL;
     muse_hatch_text_cancel();
 }
+
+/* Serial photos use the same send path as the camera's Send photo button.
+ * No camera is opened here. The host supplies a JPEG a line at a time. */
+static uint8_t *s_photo;
+static size_t s_photo_len;
+static size_t s_photo_cap;
+static atomic_bool s_photo_sending;
+static SemaphoreHandle_t s_photo_output_lock;
+
+static void photo_clear(void)
+{
+    free(s_photo);
+    s_photo = NULL;
+    s_photo_len = s_photo_cap = 0;
+}
+
+/* All strings below are fixed status codes: neither image data nor server
+ * response text is ever printed to the console. */
+static void photo_error(const char *code)
+{
+    printf("@photo {\"type\":\"error\",\"code\":\"%s\"}\n", code);
+    fflush(stdout);
+}
+
+static void photo_sent(bool sent, const char *error, void *ctx)
+{
+    (void)error;
+    (void)ctx;
+    xSemaphoreTake(s_photo_output_lock, portMAX_DELAY);
+    if (sent) printf("@photo {\"type\":\"sent\"}\n");
+    else photo_error("SEND_FAILED");
+    fflush(stdout);
+    atomic_store(&s_photo_sending, false);
+    xSemaphoreGive(s_photo_output_lock);
+}
+
+static void photo_line(const char *piece, bool last, bool whole)
+{
+    if (atomic_load(&s_photo_sending)) {
+        photo_clear();
+        photo_error("BUSY");
+        return;
+    }
+    uint8_t decoded[SERIAL_LINE / 4 * 3];
+    size_t n;
+    if (!whole || !muse_serial_photo_decode(piece, strlen(piece), last, decoded, sizeof(decoded), &n)) {
+        photo_clear();
+        photo_error(whole ? "INVALID_BASE64" : "LINE_TOO_LONG");
+        return;
+    }
+    if (n > MUSE_SERIAL_PHOTO_MAX - s_photo_len) {
+        photo_clear();
+        photo_error("TOO_LARGE");
+        return;
+    }
+    size_t wanted = s_photo_len + n;
+    if (wanted > s_photo_cap) {
+        size_t cap = s_photo_cap ? s_photo_cap * 2 : 4096;
+        if (cap < wanted) cap = wanted;
+        if (cap > MUSE_SERIAL_PHOTO_MAX) cap = MUSE_SERIAL_PHOTO_MAX;
+        uint8_t *next = heap_caps_realloc(s_photo, cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!next) {
+            photo_clear();
+            photo_error("OUT_OF_MEMORY");
+            return;
+        }
+        s_photo = next;
+        s_photo_cap = cap;
+    }
+    if (n) memcpy(s_photo + s_photo_len, decoded, n);
+    s_photo_len = wanted;
+    printf("@photo {\"type\":\"ack\",\"bytes\":%u}\n", (unsigned)s_photo_len);
+    fflush(stdout);
+    if (!last) return;
+    if (s_photo_len < 4 || s_photo[0] != 0xff || s_photo[1] != 0xd8
+        || s_photo[s_photo_len - 2] != 0xff || s_photo[s_photo_len - 1] != 0xd9) {
+        photo_clear();
+        photo_error("INVALID_JPEG");
+        return;
+    }
+    if (!s_photo_output_lock) s_photo_output_lock = xSemaphoreCreateMutex();
+    if (!s_photo_output_lock) {
+        photo_clear();
+        photo_error("OUT_OF_MEMORY");
+        return;
+    }
+    /* A very quick server ACK may race the enqueue return. Keep accepted
+     * ahead of the callback event without holding up the voice worker. */
+    xSemaphoreTake(s_photo_output_lock, portMAX_DELAY);
+    atomic_store(&s_photo_sending, true);
+    bool accepted = muse_voice_send_photo(s_photo, s_photo_len, photo_sent, NULL);
+    photo_clear();   /* the send API copies the bytes before it returns */
+    if (accepted) printf("@photo {\"type\":\"accepted\"}\n");
+    else {
+        atomic_store(&s_photo_sending, false);
+        photo_error("BUSY_OFFLINE_OR_INVALID");
+    }
+    fflush(stdout);
+    xSemaphoreGive(s_photo_output_lock);
+}
 #else
 #define CHAT_OVER_SERIAL "false"   /* no PSRAM: replies come over Link, and only short ones */
 #endif
@@ -545,6 +775,20 @@ static void set_face(const char *name)
  */
 static bool console_command(char *line, bool whole)
 {
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    if (!strcmp(line, "outfit") || !strncmp(line, "outfit=", 7)) {
+        esp_err_t err = !whole ? ESP_ERR_INVALID_ARG : !strcmp(line, "outfit")
+            ? ESP_OK : muse_wardrobe_settings_set(line + 7);
+        if (err == ESP_OK) {
+            printf("@outfit {\"ok\":true,\"outfit_id\":\"%s\"}\n", muse_wardrobe_current());
+        } else {
+            printf("@outfit {\"ok\":false,\"error\":{\"code\":\"%s\"}}\n",
+                   err == ESP_ERR_INVALID_ARG ? "invalid_params" : "storage_error");
+        }
+        fflush(stdout);
+        return true;
+    }
+#endif
     if (!strcmp(line, "status")) {
         size_t cap = 1024;   /* long SSID, host and VM names escaped: past 512 */
         char *json = heap_caps_malloc(cap, MUSE_BIG_CAPS);
@@ -586,6 +830,60 @@ static bool console_command(char *line, bool whole)
         set_face(line + 5);
         return true;
     }
+#if CONFIG_MUSE_WATCHER_CAMERA
+    /* Exercise the same local preview/review path over USB. These diagnostic
+     * commands never send a photograph to Muse or print image bytes. */
+    if (whole && !strncmp(line, "wheel=", 6)) {
+        if (!strcmp(line + 6, "next")) muse_ui_wheel_turn(1);
+        else if (!strcmp(line + 6, "prev")) muse_ui_wheel_turn(-1);
+        else if (!strcmp(line + 6, "click")) muse_ui_wheel_click();
+        else return false;
+        return true;
+    }
+#if LV_USE_SNAPSHOT
+    if (whole && !strncmp(line, "reader=", 7)) {
+        muse_ui_reply_update("usb-reader-fixture", line + 7);
+        return true;
+    }
+#endif
+    if (whole && !strncmp(line, "camera.", 7)) {
+        const char *action = line + 7;
+        watcher_camera_state_t state = watcher_camera_state();
+        if (!strcmp(action, "preview")) {
+            muse_state_poke();
+            if (state == WATCHER_CAMERA_CLOSED) watcher_camera_preview_toggle();
+        } else if (!strcmp(action, "freeze")) {
+            if (state == WATCHER_CAMERA_LIVE) watcher_camera_preview_toggle();
+        } else if (!strcmp(action, "retake")) {
+            watcher_camera_retake();
+        } else if (!strcmp(action, "close")) {
+            watcher_camera_close();
+        } else if (strcmp(action, "status")) {
+            return false;
+        }
+        char error[96];
+        watcher_camera_status(error, sizeof(error));
+        printf("@camera {\"state\":%d,\"error\":%s}\n", (int)watcher_camera_state(), error[0] ? "true" : "false");
+        fflush(stdout);
+        return true;
+    }
+#endif
+#if CONFIG_MUSE_HATCH
+    if (!strcmp(line, "photo.cancel")) {
+        photo_clear();
+        if (atomic_load(&s_photo_sending)) photo_error("ALREADY_SUBMITTED");
+        else {
+            printf("@photo {\"type\":\"cancelled\"}\n");
+            fflush(stdout);
+        }
+        return true;
+    }
+    bool photo_last = !strncmp(line, "photo=", 6);
+    if (photo_last || !strncmp(line, "photo+=", 7)) {
+        photo_line(line + (photo_last ? 6 : 7), photo_last, whole);
+        return true;
+    }
+#endif
     if (strncmp(line, "chat", 4) != 0) {
         return false;
     }
@@ -649,7 +947,11 @@ static void serial_task(void *arg)
             free(line);
         } else if (c == 'd' || c == 'u') {
             muse_state_poke();
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+            post_source(MUSE_PTT_SERIAL, c == 'd' ? MUSE_PTT_DOWN : MUSE_PTT_UP, false);
+#else
             post(c == 'd' ? MUSE_PTT_DOWN : MUSE_PTT_UP, false);
+#endif
         }
     }
 }
@@ -657,7 +959,15 @@ static void serial_task(void *arg)
 esp_err_t muse_input_start(QueueHandle_t queue)
 {
     s_queue = queue;
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    s_ptt_edges = xQueueCreate(PTT_EDGE_COUNT, sizeof(ptt_edge_t));
+    if (!s_ptt_edges) return ESP_ERR_NO_MEM;
+#endif
     if (xTaskCreate(input_task, "muse_input", 4096, NULL, 6, &s_input) != pdPASS) {
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+        vQueueDelete(s_ptt_edges);
+        s_ptt_edges = NULL;
+#endif
         return ESP_FAIL;
     }
     /* Bench-test and setup console; the input still works if it can't start. */

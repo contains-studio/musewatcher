@@ -1,0 +1,78 @@
+name: Muse Watcher
+
+on:
+  push:
+    branches: [watcher]
+  pull_request:
+    branches: [watcher]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [sensecap-watcher, aipi]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build without a personal SDK token
+        working-directory: esp32
+        env:
+          BOARD: ${{ matrix.board }}
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          idf.py -B build-ci -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-ci/sdkconfig \
+            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;devices/sdkconfig.muse;devices/sdkconfig.muse-$BOARD" build
+      - name: Install host test dependencies
+        if: matrix.board == 'sensecap-watcher'
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends libmbedtls-dev pkg-config
+          . "$IDF_PATH/export.sh" > /dev/null
+          python -m pip install -r requirements-art.txt
+      - name: Test firmware, weather selection, cards, and snapshots
+        if: matrix.board == 'sensecap-watcher'
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          python -m unittest discover -s esp32/tests -p 'test_*.py'
+          python -m unittest discover -s skills/muse-weather-display/scripts -p 'test_*.py'
+          python -m unittest discover -s tests -p 'test_*.py'
+          python esp32/tools/muse/screenshot.py --self-test
+      - name: Verify bundled sprites are reproducible
+        if: matrix.board == 'sensecap-watcher'
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          python esp32/tools/muse/wardrobe_assets.py
+          git diff --exit-code -- esp32/components/muse/wardrobe_assets.h
+
+  simulator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build and exercise the UI
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          cmake -S esp32/simulator -B build/simulator -G Ninja \
+            -DMUSE_SIM_SANITIZERS=ON -DMUSE_SIM_WARNINGS_AS_ERRORS=ON
+          cmake --build build/simulator --parallel 4
+          ctest --test-dir build/simulator --output-on-failure
+          python3 esp32/simulator/tests/test_wheel_navigation.py --build build/simulator --out /tmp/wheel-evidence

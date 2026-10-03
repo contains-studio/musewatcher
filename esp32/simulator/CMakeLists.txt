@@ -1,3 +1,4 @@
+# Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -145,6 +146,10 @@ else()
 endif()
 
 set(MUSE_COMPONENT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../components/muse")
+set(MUSE_AVATAR_SOURCE "${MUSE_COMPONENT_DIR}/../../avatar/muse_pixel.c")
+if(EXISTS "${MUSE_COMPONENT_DIR}/avatar/muse_pixel.c")
+    set(MUSE_AVATAR_SOURCE "${MUSE_COMPONENT_DIR}/avatar/muse_pixel.c")
+endif()
 
 add_executable(muse_simulator
     src/main.c
@@ -154,7 +159,7 @@ add_executable(muse_simulator
     "${MUSE_COMPONENT_DIR}/muse_ui.c"
     "${MUSE_COMPONENT_DIR}/muse_state.c"
     "${MUSE_COMPONENT_DIR}/muse_text.c"
-    "${MUSE_COMPONENT_DIR}/../../avatar/muse_pixel.c"
+    "${MUSE_AVATAR_SOURCE}"
 )
 
 target_include_directories(muse_simulator PRIVATE

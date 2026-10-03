@@ -1,0 +1,170 @@
+[
+  {
+    "id": "mild-knit",
+    "name": "Mild \u00b7 Blue rugby knit",
+    "file": "mild-knit.png",
+    "weatherCategory": "mild_dry",
+    "weatherTags": [
+      "mild",
+      "dry",
+      "clear",
+      "partly_cloudy",
+      "cloudy"
+    ]
+  },
+  {
+    "id": "warm-crochet",
+    "name": "Warm \u00b7 Crochet jersey",
+    "file": "warm-crochet.png",
+    "weatherCategory": "warm_dry",
+    "weatherTags": [
+      "warm",
+      "dry",
+      "sunny",
+      "partly_cloudy",
+      "cloudy"
+    ]
+  },
+  {
+    "id": "cool-suede",
+    "name": "Cool \u00b7 Burgundy suede",
+    "file": "cool-suede.png",
+    "weatherCategory": "cool_dry",
+    "weatherTags": [
+      "cool",
+      "dry",
+      "clear",
+      "partly_cloudy",
+      "cloudy"
+    ]
+  },
+  {
+    "id": "cold-layers",
+    "name": "Cold & snow \u00b7 Oatmeal layers",
+    "file": "cold-layers.png",
+    "weatherCategory": "cold_or_nonfreezing_snow",
+    "weatherTags": [
+      "cold",
+      "snow",
+      "snow_showers"
+    ]
+  },
+  {
+    "id": "wind-shell",
+    "name": "Wind \u00b7 Cobalt shell",
+    "file": "wind-shell.png",
+    "weatherCategory": "windy_dry",
+    "weatherTags": [
+      "windy",
+      "gusty",
+      "dry"
+    ]
+  },
+  {
+    "id": "rain-shell",
+    "name": "Rain & storms \u00b7 Patterned navy shell",
+    "file": "rain-shell.png",
+    "weatherCategory": "rain_or_storm",
+    "weatherTags": [
+      "drizzle",
+      "rain",
+      "showers",
+      "thunderstorm"
+    ]
+  },
+  {
+    "id": "heatwave-linen",
+    "name": "Extreme heat \u00b7 Butter linen",
+    "file": "heatwave-linen.png",
+    "weatherCategory": "extreme_heat_dry",
+    "weatherTags": [
+      "heatwave",
+      "extreme_heat",
+      "hot",
+      "dry",
+      "sunny",
+      "cloudy"
+    ]
+  },
+  {
+    "id": "freezing-puffer",
+    "name": "Freezing \u00b7 Silver puffer",
+    "file": "freezing-puffer.png",
+    "weatherCategory": "freezing",
+    "weatherTags": [
+      "freezing",
+      "frost",
+      "snow",
+      "blizzard",
+      "cold_wind"
+    ]
+  },
+  {
+    "id": "cold-rain-parka",
+    "name": "Cold rain \u00b7 Taupe parka",
+    "file": "cold-rain-parka.png",
+    "weatherCategory": "cold_wet",
+    "weatherTags": [
+      "cold_rain",
+      "sleet",
+      "freezing_rain",
+      "mixed_rain_snow",
+      "hail"
+    ]
+  },
+  {
+    "id": "fog-overshirt",
+    "name": "Fog & mist \u00b7 Coastal overshirt",
+    "file": "fog-overshirt.png",
+    "weatherCategory": "fog_mist",
+    "weatherTags": [
+      "fog",
+      "mist",
+      "cool",
+      "mild"
+    ]
+  },
+  {
+    "id": "warm-rain-shell",
+    "name": "Warm showers \u00b7 Ivory shell",
+    "file": "warm-rain-shell.png",
+    "weatherCategory": "warm_wet",
+    "weatherTags": [
+      "warm_rain",
+      "showers",
+      "rain",
+      "drizzle",
+      "thunderstorm",
+      "warm"
+    ]
+  },
+  {
+    "id": "hot-wind-stripes",
+    "name": "Warm wind \u00b7 Seersucker shell",
+    "file": "hot-wind-stripes.png",
+    "weatherCategory": "warm_windy",
+    "weatherTags": [
+      "warm_wind",
+      "hot_wind",
+      "windy",
+      "gusty",
+      "dry"
+    ]
+  },
+  {
+    "id": "hot-shorts",
+    "name": "Hot & dry \u00b7 Shorts and sandals, no top",
+    "file": "hot-shorts.png",
+    "weatherCategory": "hot_dry",
+    "weatherTags": [
+      "hot",
+      "dry",
+      "clear",
+      "sunny",
+      "partly_cloudy",
+      "cloudy",
+      "overcast"
+    ],
+    "styling": "Natural fluffy cream fur on torso and arms, striped shorts and sandals; no top."
+  }
+]

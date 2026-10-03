@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -35,6 +36,7 @@
 #include "muse_board.h"
 #include "muse_chat.h"
 #include "muse_console.h"
+#include "muse_input.h"
 #include "muse_link.h"
 #include "muse_mem.h"
 #include "muse_menu.h"
@@ -43,6 +45,12 @@
 #include "muse_settings_ui.h"
 #include "muse_state.h"
 #include "muse_wifi.h"
+#include "muse_touch_gesture.h"
+#include "muse_text.h"
+#include "freertos/queue.h"
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+#include "muse_wardrobe.h"
+#endif
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
 #endif
@@ -61,6 +69,12 @@ static const char *TAG = "muse_ui";
 #define SPEAKER_PX 64
 #define SPEAKER_GROW_PX 8       /* how much the speaker button swells while held */
 #define SPEAKER_HOLD_MS 400     /* LVGL's long press */
+
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER || CONFIG_MUSE_BOARD_SIMULATOR
+#define CLEAN_HOME 1
+#else
+#define CLEAN_HOME 0
+#endif
 
 #define COLOR_DIM 0x8b84a8
 #define COLOR_CAPTION 0xd8d2ff
@@ -113,9 +127,17 @@ static lv_obj_t *s_meter[METER_SEGS];
 static lv_obj_t *s_speaker;
 static lv_obj_t *s_speaker_icon;
 static lv_obj_t *s_aux_icon;
+static muse_touch_gesture_t s_touch;
 static lv_obj_t *s_image;   /* display.draw_url, over the face */
 #if CONFIG_MUSE_WATCHER_CAMERA
 static lv_obj_t *s_camera_hint;
+static lv_obj_t *s_camera_hint_text;
+static lv_obj_t *s_camera_send;
+static lv_obj_t *s_camera_send_text;
+static lv_obj_t *s_camera_retake;
+static lv_obj_t *s_camera_close;
+static lv_obj_t *s_camera_error;
+static lv_obj_t *s_camera_open;
 #endif
 static lv_image_dsc_t s_image_dsc;  /* its data is set once the image is shown */
 /* The download writes the pixels without the display lock, so a big JPEG isn't
@@ -125,6 +147,29 @@ static uint16_t *s_image_buf;
 static lv_area_t s_image_area;
 static bool s_image_dirty;
 static bool s_ready;
+
+/* The last completed card survives dismissal and camera use (until reboot).
+ * Producers take only s_image_mutex; LVGL takes display then image, never
+ * the inverse. All navigation state and objects belong to LVGL. */
+static uint16_t *s_card, *s_card_pending;
+static bool s_card_ready;
+#define READER_TEXT_MAX 8192
+static char *s_reply_text;
+static char s_reply_id[80];
+static unsigned s_reply_generation;
+static QueueHandle_t s_navigation;
+static lv_obj_t *s_nav_title, *s_nav_hint;
+static bool s_reading, s_browsing;
+enum { NAV_HOME, NAV_CARD, NAV_REPLY, NAV_COUNT };
+static int s_reader_page, s_browse_item;
+static float s_browse_until;
+#if CONFIG_MUSE_WATCHER_CAMERA
+static int s_camera_selection = -1;
+static int s_camera_selection_state = -1;
+#endif
+static bool s_reply_dismissed;
+static void navigation_tick(float now);
+static void navigation_close(void);
 
 static float s_level;
 static int s_shown_state = -1;
@@ -236,7 +281,13 @@ static lv_result_t muse_dec_get_area(lv_image_decoder_t *dec, lv_image_decoder_d
     if (!buf) {
         return LV_RESULT_INVALID;
     }
-    muse_pixel_scale((uint16_t *)buf->data, buf->header.stride / sizeof(uint16_t), full->x1, full->x2, y1, y2);
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    if (!muse_wardrobe_scale((uint16_t *)buf->data, buf->header.stride / sizeof(uint16_t),
+                            full->x1, full->x2, y1, y2, (int)s_muse_src.header.w))
+#endif
+    {
+        muse_pixel_scale((uint16_t *)buf->data, buf->header.stride / sizeof(uint16_t), full->x1, full->x2, y1, y2);
+    }
     area->x1 = full->x1;
     area->x2 = full->x2;
     area->y1 = y1;
@@ -411,6 +462,7 @@ static lv_obj_t *make_mic(lv_obj_t *parent, int size)
 
 static void set_mic_color(uint32_t color)
 {
+    if (!s_mic_icon) return;
     for (uint32_t i = 0; i < lv_obj_get_child_count(s_mic_icon); i++) {
         lv_obj_t *part = lv_obj_get_child(s_mic_icon, i);
         lv_obj_set_style_bg_color(part, lv_color_hex(color), 0);
@@ -439,7 +491,60 @@ static void build_button_icons(lv_obj_t *face)
 static void on_canvas_clicked(lv_event_t *e)
 {
     (void)e;
+#if CONFIG_MUSE_WATCHER_CAMERA
+    static int64_t last_tap;
+    int64_t now = esp_timer_get_time();
+    if (last_tap && now - last_tap <= 350000) {
+        last_tap = 0;
+        watcher_camera_preview_toggle();
+        return;
+    }
+    last_tap = now;
+#endif
     muse_state_make_happy();
+}
+
+static bool touch_home_enabled(void)
+{
+    if (!CLEAN_HOME || muse_state_asleep() || !s_tv
+        || lv_obj_get_scroll_x(s_tv) != 0 || lv_obj_is_scrolling(s_tv)
+        || lv_tileview_get_tile_active(s_tv) != s_face
+        || (s_cover && !lv_obj_has_flag(s_cover, LV_OBJ_FLAG_HIDDEN))
+        || (s_pair && !lv_obj_has_flag(s_pair, LV_OBJ_FLAG_HIDDEN))
+        || (s_image && !lv_obj_has_flag(s_image, LV_OBJ_FLAG_HIDDEN))) return false;
+#if CONFIG_MUSE_WATCHER_CAMERA
+    if (watcher_camera_state() != WATCHER_CAMERA_CLOSED) return false;
+#endif
+    return true;
+}
+
+static void touch_step(unsigned event, int x, int y)
+{
+    unsigned action = muse_touch_step(&s_touch, event,
+        (uint32_t)(esp_timer_get_time() / 1000), x, y, touch_home_enabled());
+    if (action & MUSE_TOUCH_RECORD) muse_input_touch(MUSE_PTT_DOWN);
+    if (action & MUSE_TOUCH_SEND) muse_input_touch(MUSE_PTT_UP);
+    if (action & MUSE_TOUCH_CANCEL) muse_input_touch(MUSE_PTT_CANCEL);
+    if (action & MUSE_TOUCH_PET) muse_state_make_happy();
+#if CONFIG_MUSE_WATCHER_CAMERA
+    if (action & MUSE_TOUCH_CAMERA) watcher_camera_preview_toggle();
+#endif
+}
+
+static void on_home_touch(lv_event_t *e)
+{
+    unsigned event;
+    switch (lv_event_get_code(e)) {
+    case LV_EVENT_PRESSED: event = MUSE_TOUCH_PRESS; break;
+    case LV_EVENT_PRESSING: event = MUSE_TOUCH_MOVE; break;
+    case LV_EVENT_RELEASED: event = MUSE_TOUCH_RELEASE; break;
+    case LV_EVENT_PRESS_LOST:
+    case LV_EVENT_SCROLL_BEGIN: event = MUSE_TOUCH_LOST; break;
+    default: return;
+    }
+    lv_point_t point = {0};
+    if (s_indev) lv_indev_get_point(s_indev, &point);
+    touch_step(event, point.x, point.y);
 }
 
 static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compact)
@@ -596,7 +701,6 @@ static void set_answer(int which)
         lv_obj_align(s_reply_lbl, LV_ALIGN_CENTER, 0, l->top + l->h / 2);
         lv_obj_set_style_text_align(s_reply_lbl, l->align, 0);
     }
-    move_muse(l ? l->px : s_canvas_px, l ? l->y : s_big_y);
 }
 
 /* Whether a reply `w` px wide fits across the screen `y` px from the centre. */
@@ -658,6 +762,23 @@ static void add_hides(answer_layout_t *l, int n)
  */
 static void build_answer(lv_obj_t *face, int ring_in)
 {
+    if (CLEAN_HOME) {
+        /* One readable page above the grounded character, whether or not
+         * device audio is enabled. Both layouts share the pager's geometry. */
+        const lv_font_t *font = &lv_font_unscii_16;
+        int cw = lv_font_get_glyph_width(font, 'M', ' ');
+        int pitch = lv_font_get_line_height(font) + CAPTION_LINE_SPACE;
+        answer_layout_t *l = &s_answers[ANSWER_READ];
+        l->px = MUSE_PX_W * 3;
+        l->y = s_h / 2 - 24 - (l->px / 2 - ART_BLANK_ROWS * 3);
+        l->align = LV_TEXT_ALIGN_CENTER;
+        set_reply_box(l, 18, 6, 72 - s_h / 2, cw, pitch);
+        s_reply_lbl = make_label(face, font, COLOR_CAPTION);
+        lv_obj_set_style_text_line_space(s_reply_lbl, CAPTION_LINE_SPACE, 0);
+        lv_label_set_long_mode(s_reply_lbl, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_add_flag(s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
     int spk_r = (SPEAKER_PX + SPEAKER_GROW_PX) / 2;
     int spk_x = -s_w / 2 + 8 + spk_r, spk_y = -s_h / 2 + 8 + spk_r;
     if (muse_board->round) {
@@ -788,6 +909,12 @@ static void build_screen(void)
         lv_obj_set_scrollbar_mode(s_face, LV_SCROLLBAR_MODE_OFF);
         s_settings = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_LEFT);
         face = s_face;
+        if (CLEAN_HOME) {
+            lv_tileview_set_tile(s_tv, s_face, LV_ANIM_OFF);
+            lv_obj_add_flag(face, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(face, on_home_touch, LV_EVENT_ALL, NULL);
+            lv_obj_add_event_cb(s_tv, on_home_touch, LV_EVENT_SCROLL_BEGIN, NULL);
+        }
     }
 
     if (!s_small) {
@@ -807,6 +934,10 @@ static void build_screen(void)
         lv_obj_set_style_arc_width(s_ring, 6, LV_PART_INDICATOR);
         lv_obj_set_style_arc_rounded(s_ring, false, LV_PART_INDICATOR);
         lv_obj_add_event_cb(s_ring, on_ring_draw, LV_EVENT_DRAW_MAIN | LV_EVENT_PREPROCESS, NULL);
+        if (CLEAN_HOME) {
+            lv_obj_set_style_arc_opa(s_ring, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_add_flag(s_ring, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     /*
@@ -824,6 +955,11 @@ static void build_screen(void)
     int meter_y = cap_top - 6 - METER_SEG_PX / 2;
     int art_bottom = meter_y - METER_SEG_PX / 2 - 4;
     s_big_y = s_small ? 0 : art_bottom - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
+    if (CLEAN_HOME) {
+        s_big_y = s_h / 2 - 24 - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
+        cap_top = 72 - s_h / 2;
+        meter_y = 116 - s_h / 2;
+    }
 
     /* The character. */
     muse_image_init();
@@ -831,13 +967,16 @@ static void build_screen(void)
     lv_image_set_src(s_canvas, &s_muse_src);
     lv_obj_align(s_canvas, LV_ALIGN_CENTER, 0, s_big_y);
     s_muse_y = s_big_y;
-    lv_obj_add_flag(s_canvas, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_canvas, on_canvas_clicked, LV_EVENT_CLICKED, NULL);
+    if (CLEAN_HOME) lv_obj_remove_flag(s_canvas, LV_OBJ_FLAG_CLICKABLE);
+    else {
+        lv_obj_add_flag(s_canvas, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(s_canvas, on_canvas_clicked, LV_EVENT_CLICKED, NULL);
+    }
     if (s_ring) {
         /* The canvas's black corners reach the bezel; keep the ring on top. */
         lv_obj_move_foreground(s_ring);
     }
-    build_button_icons(face);
+    if (!CLEAN_HOME) build_button_icons(face);
 
     /* Status line: connectivity icons + power. */
     lv_obj_t *status = lv_obj_create(face);
@@ -851,6 +990,7 @@ static void build_screen(void)
     s_wifi_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
     s_ble_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
     s_power_lbl = make_label(status, &lv_font_unscii_8, COLOR_DIM);
+    if (CLEAN_HOME) lv_obj_add_flag(status, LV_OBJ_FLAG_HIDDEN);
 
     /* The compact layout leaves the state to the avatar and the caption,
      * unless the screen is tall enough to fit it in small type above Muse. */
@@ -868,6 +1008,10 @@ static void build_screen(void)
     /* Same rule as the state label: a square 128 px screen centres Muse over
      * these rows, so there's nowhere to put this without covering the face. */
     lv_obj_set_flag(s_name_lbl, LV_OBJ_FLAG_HIDDEN, s_small && !s_tall);
+    if (CLEAN_HOME) {
+        lv_obj_align(s_state_lbl, LV_ALIGN_TOP_MID, 0, 56);
+        lv_obj_align(s_name_lbl, LV_ALIGN_TOP_MID, 0, 88);
+    }
 
     s_caption_lbl = make_label(face, font_pick(&lv_font_unscii_16, &lv_font_unscii_8), COLOR_CAPTION);
     if (s_small) {
@@ -900,6 +1044,7 @@ static void build_screen(void)
         lv_obj_t *seg = lv_obj_create(face);
         lv_obj_remove_style_all(seg);
         lv_obj_remove_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
+        if (CLEAN_HOME) lv_obj_remove_flag(seg, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_size(seg, METER_SEG_PX, METER_SEG_PX);
         lv_obj_set_style_bg_opa(seg, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(seg, lv_color_hex(COLOR_METER_OFF), 0);
@@ -963,16 +1108,23 @@ static void image_sync(void)
     xSemaphoreGive(s_image_mutex);
 }
 
+static void label_text(lv_obj_t *label, const char *text)
+{
+    if (strcmp(lv_label_get_text(label), text)) lv_label_set_text(label, text);
+}
+
 static void on_image_clicked(lv_event_t *e)
 {
     (void)e;
 #if CONFIG_MUSE_WATCHER_CAMERA
-    if (watcher_camera_preview_active()) {
-        watcher_camera_preview_toggle();
+    watcher_camera_state_t state = watcher_camera_state();
+    if (state != WATCHER_CAMERA_CLOSED) {
+        if (state == WATCHER_CAMERA_LIVE) watcher_camera_preview_toggle();
         return;
     }
 #endif
     image_hide_locked();
+    navigation_close();
 }
 
 #if CONFIG_MUSE_WATCHER_CAMERA
@@ -980,6 +1132,77 @@ static void on_camera_hint_clicked(lv_event_t *e)
 {
     (void)e;
     if (watcher_camera_preview_active()) watcher_camera_preview_toggle();
+}
+
+static void on_camera_open_clicked(lv_event_t *e)
+{
+    (void)e;
+    watcher_camera_preview_toggle();
+}
+
+static void on_camera_send_clicked(lv_event_t *e)
+{
+    (void)e;
+    watcher_camera_send();
+}
+
+static void on_camera_retake_clicked(lv_event_t *e)
+{
+    (void)e;
+    watcher_camera_retake();
+}
+
+static void on_camera_close_clicked(lv_event_t *e)
+{
+    (void)e;
+    watcher_camera_close();
+}
+
+static void camera_sync(void)
+{
+    if (!s_camera_hint) return;
+    watcher_camera_state_t state = watcher_camera_state();
+    char error[96];
+    watcher_camera_status(error, sizeof(error));
+    bool open = state != WATCHER_CAMERA_CLOSED;
+    bool review = state == WATCHER_CAMERA_REVIEW;
+    bool live = state == WATCHER_CAMERA_LIVE;
+    lv_obj_set_flag(s_camera_hint, LV_OBJ_FLAG_HIDDEN, !open || review);
+    lv_obj_set_state(s_camera_hint, LV_STATE_DISABLED, !live);
+    label_text(s_camera_hint_text, live ? "Take photo"
+                 : state == WATCHER_CAMERA_SENDING ? "Sending photo..."
+                 : state == WATCHER_CAMERA_CAPTURING ? "Capturing..." : "Starting camera...");
+    lv_obj_set_flag(s_camera_send, LV_OBJ_FLAG_HIDDEN, !review);
+    lv_obj_set_flag(s_camera_retake, LV_OBJ_FLAG_HIDDEN, !review);
+    label_text(s_camera_send_text, error[0] ? "Retry send" : "Send photo");
+    lv_obj_set_flag(s_camera_close, LV_OBJ_FLAG_HIDDEN, !open);
+    lv_obj_set_state(s_camera_close, LV_STATE_DISABLED, !live && !review);
+    lv_obj_set_style_border_width(s_camera_send, review && s_camera_selection == 0 ? 5 : 2, 0);
+    lv_obj_set_style_border_width(s_camera_retake, review && s_camera_selection == 1 ? 5 : 2, 0);
+    lv_obj_set_style_border_width(s_camera_close, s_camera_selection == (review ? 2 : 1) ? 5 : 2, 0);
+    lv_obj_set_style_border_width(s_camera_hint, live && s_camera_selection == 0 ? 5 : 2, 0);
+    label_text(s_camera_error, error);
+    lv_obj_set_flag(s_camera_error, LV_OBJ_FLAG_HIDDEN, !open || !error[0]);
+}
+
+static lv_obj_t *camera_button(lv_obj_t *parent, int w, int x, int y, const char *text,
+                               lv_event_cb_t action, lv_obj_t **label)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_set_size(button, w, 46);
+    lv_obj_align(button, LV_ALIGN_CENTER, x, y);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x201a35), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(button, lv_color_hex(COLOR_ACCENT), 0);
+    lv_obj_set_style_border_width(button, 2, 0);
+    lv_obj_set_style_radius(button, 18, 0);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *text_label = make_label(button, &lv_font_montserrat_14, 0xffffff);
+    lv_label_set_text(text_label, text);
+    lv_obj_center(text_label);
+    lv_obj_add_event_cb(button, action, LV_EVENT_CLICKED, NULL);
+    if (label) *label = text_label;
+    return button;
 }
 #endif
 
@@ -989,12 +1212,39 @@ static void on_any_press(lv_event_t *e)
     muse_state_poke();
 }
 
+#if CONFIG_MUSE_WATCHER_CAMERA
+static lv_obj_t *audio_toggle(lv_obj_t *parent, int x, lv_event_cb_t action, lv_obj_t **label)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_set_size(button, 90, 26);
+    lv_obj_align(button, LV_ALIGN_CENTER, x, 162);
+    lv_obj_set_style_radius(button, 12, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x201a35), 0);
+    lv_obj_set_style_pad_all(button, 0, 0);
+    *label = make_label(button, &lv_font_montserrat_14, 0xffffff);
+    lv_obj_center(*label);
+    lv_obj_add_event_cb(button, action, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_HIDDEN);
+    return button;
+}
+#endif
+
 static void build_overlays(void)
 {
     lv_obj_t *scr = lv_screen_active();
+    /* Older camera-enabled boards keep their visible shortcut. Watcher's
+     * home actions are gestures; mic and sound remain on the settings page. */
+#if CONFIG_MUSE_WATCHER_CAMERA
+    if (!CLEAN_HOME) {
+        lv_obj_t *camera_label;
+        s_camera_open = audio_toggle(s_face ? s_face : scr, 0, on_camera_open_clicked, &camera_label);
+        lv_obj_align(s_camera_open, LV_ALIGN_CENTER, 0, -112);
+        lv_label_set_text(camera_label, "Camera");
+    }
+#endif
 
     /* Page dots. */
-    for (int i = 0; i < 2 && s_tv; i++) {
+    for (int i = 0; i < 2 && s_tv && !CLEAN_HOME; i++) {
         lv_obj_t *d = lv_obj_create(scr);
         lv_obj_remove_style_all(d);
         lv_obj_set_size(d, 8, 8);
@@ -1006,6 +1256,19 @@ static void build_overlays(void)
         s_dots[i] = d;
     }
 
+    if (CLEAN_HOME) {
+        s_nav_title = make_label(scr, &lv_font_montserrat_14, COLOR_CAPTION);
+        lv_obj_set_width(s_nav_title, 260);
+        lv_obj_set_style_text_align(s_nav_title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_nav_title, LV_ALIGN_TOP_MID, 0, 92);
+        lv_obj_add_flag(s_nav_title, LV_OBJ_FLAG_HIDDEN);
+        s_nav_hint = make_label(scr, &lv_font_montserrat_14, COLOR_DIM);
+        lv_obj_set_width(s_nav_hint, 280);
+        lv_obj_set_style_text_align(s_nav_hint, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_nav_hint, LV_ALIGN_TOP_MID, 0, s_browsing ? 126 : 194);
+        lv_obj_add_flag(s_nav_hint, LV_OBJ_FLAG_HIDDEN);
+    }
+
     /* A downloaded image: over everything on the screen (and in snapshots),
      * under the pairing code and sleep cover on the top layer. */
     s_image = lv_image_create(scr);
@@ -1013,19 +1276,19 @@ static void build_overlays(void)
     lv_obj_add_flag(s_image, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(s_image, on_image_clicked, LV_EVENT_CLICKED, NULL);
 #if CONFIG_MUSE_WATCHER_CAMERA
-    s_camera_hint = lv_btn_create(scr);
-    lv_obj_set_size(s_camera_hint, 244, 46);
-    lv_obj_align(s_camera_hint, LV_ALIGN_BOTTOM_MID, 0, -20);
-    lv_obj_set_style_bg_color(s_camera_hint, lv_color_hex(0x201a35), 0);
-    lv_obj_set_style_bg_opa(s_camera_hint, LV_OPA_90, 0);
-    lv_obj_set_style_border_color(s_camera_hint, lv_color_hex(COLOR_ACCENT), 0);
-    lv_obj_set_style_border_width(s_camera_hint, 2, 0);
-    lv_obj_set_style_radius(s_camera_hint, 18, 0);
-    lv_obj_add_flag(s_camera_hint, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_t *hint_text = lv_label_create(s_camera_hint);
-    lv_label_set_text(hint_text, "TAP TO TAKE PHOTO");
-    lv_obj_center(hint_text);
-    lv_obj_add_event_cb(s_camera_hint, on_camera_hint_clicked, LV_EVENT_CLICKED, NULL);
+    s_camera_hint = camera_button(scr, 224, 0, 110, "Take photo", on_camera_hint_clicked,
+                                  &s_camera_hint_text);
+    s_camera_retake = camera_button(scr, 108, -66, 110, "Retake", on_camera_retake_clicked, NULL);
+    s_camera_send = camera_button(scr, 120, 64, 110, "Send photo", on_camera_send_clicked,
+                                  &s_camera_send_text);
+    s_camera_close = camera_button(scr, 46, 114, -114, LV_SYMBOL_CLOSE, on_camera_close_clicked, NULL);
+    s_camera_error = make_label(scr, &lv_font_montserrat_14, 0xffffff);
+    lv_obj_set_size(s_camera_error, 244, 42);
+    lv_obj_align(s_camera_error, LV_ALIGN_CENTER, 0, 58);
+    lv_obj_set_style_bg_color(s_camera_error, lv_color_hex(0x201a35), 0);
+    lv_obj_set_style_bg_opa(s_camera_error, LV_OPA_90, 0);
+    lv_label_set_long_mode(s_camera_error, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_add_flag(s_camera_error, LV_OBJ_FLAG_HIDDEN);
 #endif
 
     /* BLE pairing code, or the Muse app's ask for the talk button: a centred
@@ -1156,7 +1419,7 @@ static void update_chrome(float now)
         }
         int shown = page * 2 + subpage;
         if (shown != s_shown_page) {
-            for (int i = 0; i < 2; i++) {
+            for (int i = 0; i < 2 && !CLEAN_HOME; i++) {
                 lv_obj_set_style_bg_color(s_dots[i], lv_color_hex(i == page ? COLOR_ACCENT : COLOR_DOT_OFF), 0);
                 lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, page && subpage);
             }
@@ -1234,7 +1497,7 @@ static void update_chrome(float now)
     }
     /* Unpaired, a press only says "SET UP MUSE FIRST", so the mic goes too.
      * While a reply's layout is up it decides; that's only ever paired. */
-    if (s_answer < 0 && paired == lv_obj_has_flag(s_mic_icon, LV_OBJ_FLAG_HIDDEN)) {
+    if (s_mic_icon && s_answer < 0 && paired == lv_obj_has_flag(s_mic_icon, LV_OBJ_FLAG_HIDDEN)) {
         lv_obj_set_flag(s_mic_icon, LV_OBJ_FLAG_HIDDEN, !paired);
     }
 }
@@ -1345,7 +1608,7 @@ static void update_status(muse_mode_t mode, float now)
     }
 
     /* The mic's meter; a reply's page has the room while answering. */
-    bool meter = mode == MUSE_MODE_LISTENING;
+    bool meter = mode == MUSE_MODE_LISTENING && s_muse_y <= s_big_y;
     set_meter_visible(meter);
     if (meter && !s_small) {
         int lit = (int)lroundf(s_level * METER_SEGS);
@@ -1364,15 +1627,29 @@ static void update_status(muse_mode_t mode, float now)
 
     static char caption[MUSE_CAPTION_MAX];
     bool fresh = muse_state_caption(caption, sizeof(caption), &s_caption_version);
+    bool manual = CLEAN_HOME && s_reading;
+    if (manual) {
+        xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+        int pages = muse_text_page(s_reply_text, 18, 6, s_reader_page, caption, sizeof(caption));
+        if (s_reader_page >= pages) s_reader_page = pages > 0 ? pages - 1 : 0;
+        xSemaphoreGive(s_image_mutex);
+        char hint[80];
+        snprintf(hint, sizeof(hint), "Page %d/%d   Press wheel: done", s_reader_page + 1, pages);
+        label_text(s_nav_hint, hint);
+        fresh = true;
+    } else if (CLEAN_HOME && (s_browsing || s_reply_dismissed)) {
+        caption[0] = '\0';
+        fresh = true;
+    }
     int answer = -1;
     if (s_reply_lbl) {
         /* The speaker picks the layout, even mid-reply: the voice task pages to fit. */
-        int layout = muse_settings_speaker_on() ? ANSWER_HEARD : ANSWER_READ;
+        int layout = CLEAN_HOME ? ANSWER_READ : muse_settings_speaker_on() ? ANSWER_HEARD : ANSWER_READ;
         if (layout != s_page_for) {
             muse_state_set_page(s_answers[layout].cols, s_answers[layout].lines);
             s_page_for = layout;
         }
-        if (mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING) {
+        if (manual || (!s_reply_dismissed && (mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING))) {
             answer = layout;
         }
     }
@@ -1380,14 +1657,47 @@ static void update_status(muse_mode_t mode, float now)
         set_answer(answer);
         fresh = true;   /* the caption moves between labels */
     }
+    const answer_layout_t *layout = answer >= 0 ? &s_answers[answer] : NULL;
+    int px = layout ? layout->px : s_canvas_px;
+    int y = layout ? layout->y : s_big_y;
+    if (!CLEAN_HOME && !layout && mode == MUSE_MODE_IDLE && !caption[0]) {
+        y += muse_board->idle_avatar_y_offset;
+    }
+    /* Keep the lower resting pose clear of captions and the recording meter. */
+    if (px != s_to_px || y != s_to_y) {
+        move_muse(px, y);
+    }
+    lv_obj_t *lbl = answer >= 0 ? s_reply_lbl : s_caption_lbl;
     if (fresh) {
-        lv_obj_t *lbl = answer >= 0 ? s_reply_lbl : s_caption_lbl;
-        lv_label_set_text(lbl, caption);
-        lv_obj_set_flag(lbl, LV_OBJ_FLAG_HIDDEN, !caption[0]);
+        label_text(lbl, caption);
         if (s_reply_lbl) {
             lv_obj_add_flag(answer >= 0 ? s_caption_lbl : s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
         }
     }
+    bool lifting = !CLEAN_HOME && muse_board->idle_avatar_y_offset > 0 && s_muse_y > s_to_y;
+    lv_obj_set_flag(lbl, LV_OBJ_FLAG_HIDDEN, !caption[0] || lifting);
+    if (CLEAN_HOME) {
+        bool setup = mode == MUSE_MODE_IDLE && strcmp(s_idle_name, "READY") != 0;
+        bool waiting = mode == MUSE_MODE_BOOT || mode == MUSE_MODE_OFF
+                       || mode == MUSE_MODE_ERROR || (mode == MUSE_MODE_THINKING && !caption[0]);
+        lv_obj_set_flag(s_state_lbl, LV_OBJ_FLAG_HIDDEN, !setup && !waiting);
+        /* Pairing keeps its identity line. Captions move below those two
+         * setup lines only while the device still needs configuration. */
+        bool identity = lv_label_get_text(s_name_lbl)[0] != '\0';
+        lv_obj_set_flag(s_name_lbl, LV_OBJ_FLAG_HIDDEN, !identity);
+        static int caption_y = -1;
+        int y = identity || setup ? 120 : 72;
+        if (answer < 0 && caption_y != y) {
+            lv_obj_align(s_caption_lbl, LV_ALIGN_TOP_MID, 0, y);
+            caption_y = y;
+        }
+        if (s_ring) lv_obj_set_flag(s_ring, LV_OBJ_FLAG_HIDDEN,
+            mode != MUSE_MODE_LISTENING && mode != MUSE_MODE_THINKING);
+    }
+#if CONFIG_MUSE_WATCHER_CAMERA
+    if (s_camera_open) lv_obj_set_flag(s_camera_open, LV_OBJ_FLAG_HIDDEN,
+                                      mode != MUSE_MODE_IDLE || caption[0]);
+#endif
     update_power(now);
 }
 
@@ -1438,7 +1748,11 @@ static void frame_tick(lv_timer_t *timer)
         send_snapshot();
     }
     (void)timer;
+    navigation_tick((float)esp_timer_get_time() / 1e6f);
     image_sync();
+#if CONFIG_MUSE_WATCHER_CAMERA
+    camera_sync();
+#endif
     float mode_t;
     muse_mode_t mode = muse_state_mode(&mode_t);
     float now = (float)esp_timer_get_time() / 1e6f;
@@ -1446,14 +1760,17 @@ static void frame_tick(lv_timer_t *timer)
     if (mode != s_last_mode) {
         if (mode == MUSE_MODE_LISTENING) {
             image_hide_locked();
+            navigation_close();
             muse_ui_show_face();
         }
         s_last_mode = mode;
     }
     if (update_sleep()) {
+        if (CLEAN_HOME) touch_step(MUSE_TOUCH_LOST, 0, 0);
         return;
     }
     update_chrome(now);
+    if (CLEAN_HOME && (s_touch.down || s_touch.waiting)) touch_step(0, 0, 0);
     if (muse_menu_tick(now)) {
         image_hide_locked();
         return;   /* the menu covers the face */
@@ -1479,7 +1796,31 @@ static void frame_tick(lv_timer_t *timer)
         .happy = muse_state_happiness(),
     };
     muse_pixel_render(&pose);
-    invalidate_muse();
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    bool ambient = mode == MUSE_MODE_IDLE && !s_reading && !s_browsing
+                   && s_answer < 0 && !strcmp(s_idle_name, "READY")
+                   && lv_obj_has_flag(s_pair, LV_OBJ_FLAG_HIDDEN)
+                   && muse_link_state() != MUSE_LINK_CONFIRM;
+#if CONFIG_MUSE_WATCHER_CAMERA
+    ambient = ambient && watcher_camera_state() == WATCHER_CAMERA_CLOSED;
+#endif
+    if (ambient) {
+        /* The visible caption label is updated later in this frame. */
+        static char caption_start[2];
+        static uint32_t caption_version = UINT32_MAX;
+        muse_state_caption(caption_start, sizeof(caption_start), &caption_version);
+        ambient = caption_start[0] == '\0';
+    }
+    if (muse_wardrobe_render(&pose, ambient)) {
+        /* Outfit sprites use their own pixel grid. The procedural avatar's
+         * 64-cell dirty-region cache cannot track them or a later reset. */
+        s_cells_valid = false;
+        lv_obj_invalidate(s_canvas);
+    } else
+#endif
+    {
+        invalidate_muse();
+    }
 
     update_status(mode, now);
 }
@@ -1512,6 +1853,7 @@ esp_err_t muse_ui_start(void)
     }
 
     s_image_mutex = xSemaphoreCreateMutex();
+    if (CLEAN_HOME) s_navigation = xQueueCreate(32, sizeof(int));
     muse_board->display_lock(-1);
     build_screen();
     if (s_settings) {
@@ -1551,6 +1893,223 @@ void muse_ui_preview_brightness(int pct)
 {
     s_preview_brightness = pct;
     apply_brightness(pct);
+}
+
+static void navigation_close(void)
+{
+    s_reading = s_browsing = false;
+    if (s_nav_title) lv_obj_add_flag(s_nav_title, LV_OBJ_FLAG_HIDDEN);
+    if (s_nav_hint) lv_obj_add_flag(s_nav_hint, LV_OBJ_FLAG_HIDDEN);
+    /* Force the timed/status caption to be restored after a manual page. */
+    s_caption_version = UINT32_MAX;
+}
+
+void muse_ui_wheel_turn(int direction)
+{
+    int key = direction < 0 ? -1 : 1;
+    if (s_ready && s_navigation) xQueueSend(s_navigation, &key, 0);
+}
+
+void muse_ui_wheel_click(void)
+{
+    int key = 0;
+    if (s_ready && s_navigation) xQueueSend(s_navigation, &key, 0);
+}
+
+void muse_ui_reply_update(const char *id, const char *text)
+{
+    if (!CLEAN_HOME || !s_ready || !text || !text[0]) return;
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    if (!s_reply_text) s_reply_text = heap_caps_malloc(READER_TEXT_MAX, MALLOC_CAP_SPIRAM);
+    if (s_reply_text) {
+        if (strcmp(s_reply_id, id)) {
+            snprintf(s_reply_id, sizeof(s_reply_id), "%s", id);
+            s_reply_generation++;
+        }
+        snprintf(s_reply_text, READER_TEXT_MAX, "%s", text);
+        muse_text_to_ascii(s_reply_text, READER_TEXT_MAX);
+    }
+    xSemaphoreGive(s_image_mutex);
+}
+
+/* Called only by LVGL, with s_image_mutex held. */
+static bool card_show_locked(void)
+{
+    if (!s_card) return false;
+    if (!s_image_buf) s_image_buf = heap_caps_malloc((size_t)s_w * s_h * 2, MALLOC_CAP_SPIRAM);
+    if (!s_image_buf) return false;
+    memcpy(s_image_buf, s_card, (size_t)s_w * s_h * 2);
+    s_image_area = (lv_area_t){0, 0, s_w - 1, s_h - 1};
+    s_image_dirty = true;
+    return true;
+}
+
+static void navigation_tick(float now)
+{
+    if (!CLEAN_HOME) return;
+    int camera = 0;
+#if CONFIG_MUSE_WATCHER_CAMERA
+    camera = watcher_camera_state();
+    if (camera != s_camera_selection_state) {
+        s_camera_selection_state = camera;
+        s_camera_selection = -1;
+    }
+#endif
+    muse_mode_t mode = muse_state_mode(NULL);
+    bool settings = s_tv && lv_tileview_get_tile_active(s_tv) != s_face;
+    bool blocked = muse_state_asleep() || mode == MUSE_MODE_LISTENING || settings
+                   || muse_link_state() == MUSE_LINK_CONFIRM;
+    if (blocked || camera) navigation_close();
+    if (mode == MUSE_MODE_IDLE) s_reply_dismissed = false;
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    bool have_reply = s_reply_text && s_reply_text[0];
+    bool have_card = s_card != NULL;
+    static unsigned generation;
+    if (generation != s_reply_generation) {
+        generation = s_reply_generation;
+        s_reader_page = 0;
+        s_reply_dismissed = false;
+    }
+    if (s_card_ready && !blocked && !camera) {
+        if (card_show_locked()) {
+            s_card_ready = false;
+            s_reading = s_browsing = false;
+        }
+    }
+    xSemaphoreGive(s_image_mutex);
+    int key;
+    while (s_navigation && xQueueReceive(s_navigation, &key, 0) == pdTRUE) {
+        if (blocked) continue;
+        muse_state_poke();
+#if CONFIG_MUSE_WATCHER_CAMERA
+        if (camera) {
+            bool review = camera == WATCHER_CAMERA_REVIEW;
+            bool live = camera == WATCHER_CAMERA_LIVE;
+            if (!review && !live) continue;
+            int count = review ? 3 : 2;
+            if (key) s_camera_selection = s_camera_selection < 0 ? (key > 0 ? 0 : count - 1)
+                : (s_camera_selection + key + count) % count;
+            else if (s_camera_selection < 0) s_camera_selection = 0;
+            else if (review && s_camera_selection == 0) watcher_camera_send();
+            else if (review && s_camera_selection == 1) watcher_camera_retake();
+            else if (s_camera_selection == count - 1) watcher_camera_close();
+            else watcher_camera_preview_toggle();
+            /* An action changes state asynchronously; never apply another
+             * queued press to a different photo before the next frame. */
+            if (!key) break;
+            continue;
+        }
+#endif
+        if (!key) {
+            if (s_browsing) {
+                int item = s_browse_item;
+                navigation_close();
+                if (item == NAV_CARD && have_card) {
+                    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+                    card_show_locked();
+                    xSemaphoreGive(s_image_mutex);
+                } else if (item == NAV_REPLY && have_reply) {
+                    s_reading = true;
+                    s_reader_page = 0;
+                }
+            } else if (s_reading || s_image_buf) {
+                s_reply_dismissed = s_reading;
+                image_hide_locked();
+                navigation_close();
+                muse_state_set_caption("%s", "");
+            } else muse_state_make_happy();
+        } else if (s_reading || (!s_browsing && !s_image_buf && have_reply
+                                  && (mode == MUSE_MODE_SPEAKING || mode == MUSE_MODE_THINKING))) {
+            if (!s_reading) {
+                /* Start at the automatically displayed page before stepping. */
+                char caption[MUSE_CAPTION_MAX], page[MUSE_CAPTION_MAX];
+                uint32_t version = UINT32_MAX;
+                muse_state_caption(caption, sizeof(caption), &version);
+                char *newline = strchr(caption, '\n');
+                if (newline) *newline = '\0';
+                xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+                int pages = muse_text_page(s_reply_text, 18, 6, 0, page, sizeof(page));
+                for (int i = 0; caption[0] && i < pages; i++) {
+                    muse_text_page(s_reply_text, 18, 6, i, page, sizeof(page));
+                    if (strstr(page, caption)) { s_reader_page = i; break; }
+                }
+                xSemaphoreGive(s_image_mutex);
+            }
+            s_reading = true;
+            s_reader_page += key;
+            if (s_reader_page < 0) s_reader_page = 0;
+        } else {
+            bool first = !s_browsing;
+            image_hide_locked();
+            s_reading = false;
+            s_browsing = true;
+            if (first) s_browse_item = key > 0 ? NAV_HOME : NAV_COUNT;
+            do {
+                s_browse_item = (s_browse_item + key + NAV_COUNT) % NAV_COUNT;
+            } while ((s_browse_item == NAV_CARD && !have_card) || (s_browse_item == NAV_REPLY && !have_reply));
+            s_browse_until = now + 10;
+        }
+    }
+#if CONFIG_MUSE_WATCHER_CAMERA
+    if (camera && !blocked && s_camera_selection >= 0) {
+        const char *action = camera == WATCHER_CAMERA_REVIEW
+            ? (s_camera_selection == 0 ? "Send photo" : s_camera_selection == 1 ? "Retake" : "Cancel")
+            : (s_camera_selection == 0 ? "Take photo" : "Cancel");
+        char hint[64];
+        snprintf(hint, sizeof(hint), "Press wheel: %s", action);
+        label_text(s_nav_hint, hint);
+        lv_obj_align(s_nav_hint, LV_ALIGN_TOP_MID, 0, 206);
+        lv_obj_set_style_bg_color(s_nav_hint, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(s_nav_hint, LV_OPA_80, 0);
+        lv_obj_set_style_text_color(s_nav_hint, lv_color_hex(COLOR_LIT), 0);
+        lv_obj_move_foreground(s_nav_hint);
+        lv_obj_remove_flag(s_nav_hint, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+#endif
+    lv_obj_align(s_nav_hint, LV_ALIGN_TOP_MID, 0, s_browsing ? 126 : 194);
+    if (s_browsing && now >= s_browse_until) navigation_close();
+    lv_obj_set_style_bg_opa(s_nav_hint, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_color(s_nav_hint, lv_color_hex(COLOR_DIM), 0);
+    lv_obj_set_flag(s_nav_title, LV_OBJ_FLAG_HIDDEN, !s_browsing);
+    lv_obj_set_flag(s_nav_hint, LV_OBJ_FLAG_HIDDEN, !s_browsing && !s_reading);
+    if (s_browsing) {
+        label_text(s_nav_title, s_browse_item == NAV_CARD ? "Latest card" : s_browse_item == NAV_REPLY ? "Last reply" : "Back to Muse");
+        label_text(s_nav_hint, "Turn wheel to browse\nPress wheel to open");
+    }
+}
+
+bool muse_ui_card_draw(int x, int y, int w, int h, const uint16_t *pixels)
+{
+    if (!CLEAN_HOME) return muse_ui_image_draw(x, y, w, h, pixels);
+    if (!s_ready || x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > s_w || y + h > s_h) return false;
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    if (!s_card_pending) s_card_pending = heap_caps_calloc((size_t)s_w * s_h, 2, MALLOC_CAP_SPIRAM);
+    bool ok = s_card_pending != NULL;
+    const uint8_t *src = (const uint8_t *)pixels;
+    if (ok) for (int row = 0; row < h; row++) {
+        uint16_t *dst = s_card_pending + (size_t)(y + row) * s_w + x;
+        for (int i = 0; i < w; i++, src += 2) dst[i] = (uint16_t)(src[0] << 8 | src[1]);
+    }
+    xSemaphoreGive(s_image_mutex);
+    return ok;
+}
+
+void muse_ui_card_finish(bool success)
+{
+    if (!CLEAN_HOME || !s_ready) return;
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    if (success && s_card_pending) {
+        heap_caps_free(s_card);
+        s_card = s_card_pending;
+        s_card_pending = NULL;
+        s_card_ready = true;
+        muse_state_set_asleep(false);
+    } else {
+        heap_caps_free(s_card_pending);
+        s_card_pending = NULL;
+    }
+    xSemaphoreGive(s_image_mutex);
 }
 
 bool muse_ui_image_size(int *w, int *h)
@@ -1600,6 +2159,18 @@ bool muse_ui_image_draw(int x, int y, int w, int h, const uint16_t *pixels)
     return true;
 }
 
+void muse_ui_show_animation(void)
+{
+    if (!s_ready) return;
+    muse_board->display_lock(-1);
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    s_card_ready = false;
+    xSemaphoreGive(s_image_mutex);
+    image_hide_locked();
+    navigation_close();
+    muse_board->display_unlock();
+}
+
 void muse_ui_image_hide(void)
 {
     if (!s_ready) {
@@ -1607,19 +2178,16 @@ void muse_ui_image_hide(void)
     }
     muse_board->display_lock(-1);
     image_hide_locked();
-#if CONFIG_MUSE_WATCHER_CAMERA
-    if (s_camera_hint) lv_obj_add_flag(s_camera_hint, LV_OBJ_FLAG_HIDDEN);
-#endif
     muse_board->display_unlock();
 }
 
 #if CONFIG_MUSE_WATCHER_CAMERA
 void muse_ui_camera_hint(bool visible)
 {
+    (void)visible;   /* The camera's state owns all preview and review controls. */
     if (!s_ready || !s_camera_hint) return;
     muse_board->display_lock(-1);
-    if (visible) lv_obj_remove_flag(s_camera_hint, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(s_camera_hint, LV_OBJ_FLAG_HIDDEN);
+    camera_sync();
     muse_board->display_unlock();
 }
 #endif

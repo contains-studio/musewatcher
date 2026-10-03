@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -39,6 +40,7 @@
 typedef enum {
     MUSE_SETTING_VOLUME,
     MUSE_SETTING_SPEAKER,
+    MUSE_SETTING_MIC,
     MUSE_SETTING_MIC_GAIN,
     MUSE_SETTING_BRIGHTNESS,
     MUSE_SETTING_SLEEP,
@@ -54,6 +56,8 @@ void muse_settings_set_listener(muse_setting_cb_t cb);
 
 int muse_settings_volume(void);         /* 0..100 */
 bool muse_settings_speaker_on(void);    /* off: replies are shown, not played */
+bool muse_settings_mic_on(void);        /* off: no recording or microphone monitoring */
+uint32_t muse_settings_mic_generation(void); /* every toggle invalidates earlier capture */
 int muse_settings_mic_gain(void);       /* dB, 0..MUSE_MIC_GAIN_MAX */
 int muse_settings_brightness(void);     /* 10..100 */
 int muse_settings_sleep_s(void);        /* 0 = never */
@@ -68,6 +72,7 @@ size_t muse_settings_hatch_token_len(void);
 
 void muse_settings_set_volume(int pct);
 void muse_settings_set_speaker_on(bool on);
+void muse_settings_set_mic_on(bool on);
 void muse_settings_set_mic_gain(int db);
 void muse_settings_set_brightness(int pct);
 void muse_settings_set_sleep_s(int secs);

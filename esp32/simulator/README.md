@@ -1,3 +1,5 @@
+<!-- Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md. -->
+
 <!--
 Copyright (c) Meta Platforms, Inc. and affiliates.
 
@@ -185,7 +187,11 @@ Supported scenario keys are:
 - `ble`: `off`, `advertising`, or `connected`; plus `passkey` and `paired`
 - `link`: `boot`, `unpaired`, `pairing`, `confirm`, `connecting`, `online`,
   `offline`, or `error`
-- `speaker`, `brightness`, and `advance` in milliseconds
+- `speaker` and `microphone`: `true` or `false`; plus `brightness` and `advance`
+  in milliseconds
+- `camera`: `closed`, `starting`, `live`, `capturing`, `review`, `sending`,
+  or `error`. These use a synthetic checkerboard and simulated camera actions
+  to preview the controls; no camera capture or network upload occurs.
 
 Invalid options and scenario values return a nonzero exit status and identify
 the bad line.

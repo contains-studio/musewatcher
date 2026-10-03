@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -85,6 +86,7 @@ static const muse_board_t s_sim_board = {
     .aux_button = "scroll",
     .talk_hint = { LV_ALIGN_CENTER, 100, -143 },
     .frame_ms = 40,
+    .idle_avatar_y_offset = 40,
     .init = sim_init,
     .display_start = sim_display_start,
     .display_lock = sim_display_lock,

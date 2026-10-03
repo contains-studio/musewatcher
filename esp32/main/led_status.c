@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -1195,7 +1196,11 @@ bool led_status_draw_rect(int x, int y, int w, int h, const uint16_t *pixels) {
     }
     return lcd_draw_image_rect(x, y, w, h, pixels);
 #elif CONFIG_HOMEHUB_LED_BACKEND_MUSE && CONFIG_HOMEHUB_DISPLAY_COMMANDS
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    return muse_ui_card_draw(x, y, w, h, pixels);
+#else
     return muse_ui_image_draw(x, y, w, h, pixels);
+#endif
 #else
     (void)x;
     (void)y;
@@ -1222,6 +1227,10 @@ void led_status_show_animation(void) {
     s_title_dirty = true;
     xSemaphoreGive(s_mutex);
 #elif CONFIG_HOMEHUB_LED_BACKEND_MUSE && CONFIG_HOMEHUB_DISPLAY_COMMANDS
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    muse_ui_show_animation();
+#else
     muse_ui_image_hide();
+#endif
 #endif
 }

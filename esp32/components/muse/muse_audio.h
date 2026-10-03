@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -39,6 +40,7 @@ void muse_audio_power(bool on);
 
 void muse_audio_set_volume(int volume);          /* 0..100 */
 void muse_audio_set_mic_gain(int db);            /* 0..MUSE_MIC_GAIN_MAX */
+void muse_audio_set_mic_on(bool on);
 
 /* Measures the real capture/playback rates and per-mic levels; logs the result. */
 void muse_audio_selftest(void);

@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -226,4 +227,50 @@ const char *muse_text_showable(const char *text, char *buf, size_t cap)
     }
     muse_text_to_ascii(buf, cap);
     return buf;
+}
+
+/* Manual pages use the same displayable ASCII as captions. Each word appears
+ * once; keeping explicit page boundaries makes backwards reading predictable. */
+static const char *page_line(const char *p, int cols, const char **start, size_t *len)
+{
+    while (*p == ' ' || *p == '\n' || *p == '\r') p++;
+    *start = p;
+    const char *end = p, *space = NULL;
+    while (*end && *end != '\n' && end - p < cols) {
+        if (*end == ' ') space = end;
+        end++;
+    }
+    if (*end && *end != ' ' && *end != '\n' && space) end = space;
+    *len = (size_t)(end - p);
+    return end;
+}
+
+int muse_text_page(const char *text, int cols, int lines, int page, char *out, size_t cap)
+{
+    if (cap) out[0] = '\0';
+    if (!text || cols < 1 || lines < 1) return 0;
+    const char *p = text, *start;
+    size_t len;
+    int count = 0;
+    while (*(p = page_line(p, cols, &start, &len)) || len) {
+        if (!len) break;
+        count++;
+    }
+    int pages = (count + lines - 1) / lines;
+    if (!pages || !cap) return pages;
+    if (page < 0) page = 0;
+    if (page >= pages) page = pages - 1;
+    size_t used = 0;
+    p = text;
+    for (int i = 0; i < (page + 1) * lines; i++) {
+        p = page_line(p, cols, &start, &len);
+        if (!len) break;
+        if (i < page * lines) continue;
+        if (used + len + (used ? 1 : 0) >= cap) break;
+        if (used) out[used++] = '\n';
+        memcpy(out + used, start, len);
+        used += len;
+        out[used] = '\0';
+    }
+    return pages;
 }

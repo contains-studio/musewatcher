@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -36,11 +37,13 @@ extern "C" {
  * loop, settings, Hatch) is shared; Wi-Fi and BLE belong to Home Link.
  */
 
-/* Button edges reported by poll_buttons(). */
+/* Button edges and signed wheel detents reported by poll_buttons(). */
 #define MUSE_BTN_TALK_PRESS   (1u << 0)
 #define MUSE_BTN_TALK_RELEASE (1u << 1)
 #define MUSE_BTN_AUX_PRESS    (1u << 2)
 #define MUSE_BTN_AUX_RELEASE  (1u << 3)
+#define MUSE_BTN_WHEEL_PREV   (1u << 4)
+#define MUSE_BTN_WHEEL_NEXT   (1u << 5)
 
 /* Where a button's icon goes on screen: beside the button, inside the panel. */
 typedef struct {
@@ -59,6 +62,7 @@ typedef struct {
     muse_button_hint_t talk_hint;   /* mic icon; the menu's hints follow both */
     muse_button_hint_t aux_hint;    /* power or menu icon; left out, there's none */
     int frame_ms;           /* face animation period */
+    int idle_avatar_y_offset;   /* extra room below Muse when no caption or meter is shown */
 
     /* Power rails, buses, expanders. Runs first. */
     esp_err_t (*init)(void);

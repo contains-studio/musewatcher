@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -974,6 +975,13 @@ static void on_speaker_sw(lv_event_t *e)
     muse_settings_set_speaker_on(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
+static lv_obj_t *s_mic_sw;
+
+static void on_mic_sw(lv_event_t *e)
+{
+    muse_settings_set_mic_on(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
 static void on_volume(lv_event_t *e)
 {
     int v = lv_slider_get_value(s_vol_sl);
@@ -1013,6 +1021,7 @@ static void build_sound_page(lv_obj_t *tile)
     lv_obj_t *list;
     s_sound = page(tile, "SOUND", true, &list);
     s_spk_sw = switch_row(list, "Speaker", muse_settings_speaker_on(), on_speaker_sw);
+    s_mic_sw = switch_row(list, "Microphone", muse_settings_mic_on(), on_mic_sw);
     s_vol_sl = slider(list, "Volume", 0, 100, muse_settings_volume(), &s_vol_val, on_volume);
     s_gain_sl = slider(list, "Mic gain", 0, MUSE_MIC_GAIN_MAX / 3, muse_settings_mic_gain() / 3, &s_gain_val, on_gain);
 
@@ -1041,6 +1050,7 @@ static void build_sound_page(lv_obj_t *tile)
 
 static void tick_sound(void)
 {
+    lv_obj_set_state(s_mic_sw, LV_STATE_CHECKED, muse_settings_mic_on());
     bool on = muse_settings_speaker_on();   /* also toggled from the face */
     if (on != lv_obj_has_state(s_spk_sw, LV_STATE_CHECKED)) {
         lv_obj_set_state(s_spk_sw, LV_STATE_CHECKED, on);

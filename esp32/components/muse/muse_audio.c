@@ -1,3 +1,4 @@
+// Modified by contains-studio for Muse Watcher (2026); see root CHANGES.md.
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -44,6 +45,8 @@ static int16_t s_out_stereo[MUSE_AUDIO_CHUNK * CHANNELS];
 /* One-pole high-pass on the mixed mic signal. */
 static float s_hpf_a;
 static float s_hpf_x1, s_hpf_y1;
+static uint32_t s_read_generation;
+static bool s_read_generation_valid;
 
 static esp_err_t open_codecs(void)
 {
@@ -55,6 +58,8 @@ static esp_err_t open_codecs(void)
     ESP_RETURN_ON_FALSE(esp_codec_dev_open(s_spk, &fs) == ESP_CODEC_DEV_OK, ESP_FAIL, TAG, "open speaker");
     ESP_RETURN_ON_FALSE(esp_codec_dev_open(s_mic, &fs) == ESP_CODEC_DEV_OK, ESP_FAIL, TAG, "open mic");
     s_open = true;
+    s_read_generation_valid = false;
+    muse_audio_set_mic_on(muse_settings_mic_on());
     return ESP_OK;
 }
 
@@ -114,6 +119,11 @@ void muse_audio_set_mic_gain(int db)
     } else {
         esp_codec_dev_set_in_gain(s_mic, (float)db);
     }
+}
+
+void muse_audio_set_mic_on(bool on)
+{
+    if (s_mic && s_open) esp_codec_dev_set_in_mute(s_mic, !on);
 }
 
 static float to_db(double mean_sq)
@@ -249,11 +259,37 @@ void muse_audio_loopback_test(int volume)
 
 esp_err_t muse_audio_read(int16_t *mono, size_t frames)
 {
+    int16_t *start = mono;
+    size_t total = frames;
+    uint32_t generation = muse_settings_mic_generation();
+    esp_err_t result = ESP_ERR_INVALID_STATE;
+    if (!muse_settings_mic_on()) goto discard;
+    if (!s_read_generation_valid || generation != s_read_generation) {
+        /* Only the capture task drains input. A rapid OFF/ON still changes
+         * generation, so no pre-mute DMA samples or filter history survive. */
+        s_read_generation_valid = false;
+        s_hpf_x1 = s_hpf_y1 = 0;
+        for (size_t left = MUSE_AUDIO_RATE / 4; left;) {
+            if (!muse_settings_mic_on() || generation != muse_settings_mic_generation()) goto discard;
+            size_t n = left > MUSE_AUDIO_CHUNK ? MUSE_AUDIO_CHUNK : left;
+            if (esp_codec_dev_read(s_mic, s_in_stereo, n * CHANNELS * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
+                result = ESP_FAIL;
+                goto discard;
+            }
+            left -= n;
+        }
+        if (!muse_settings_mic_on() || generation != muse_settings_mic_generation()) goto discard;
+        s_read_generation = generation;
+        s_read_generation_valid = true;
+    }
     while (frames) {
+        if (!muse_settings_mic_on() || generation != muse_settings_mic_generation()) goto discard;
         size_t n = frames > MUSE_AUDIO_CHUNK ? MUSE_AUDIO_CHUNK : frames;
         if (esp_codec_dev_read(s_mic, s_in_stereo, n * CHANNELS * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
-            return ESP_FAIL;
+            result = ESP_FAIL;
+            goto discard;
         }
+        if (!muse_settings_mic_on() || generation != muse_settings_mic_generation()) goto discard;
         for (size_t i = 0; i < n; i++) {
             float x = muse_board->mic_slot < 0 ? 0.5f * ((float)s_in_stereo[2 * i] + (float)s_in_stereo[2 * i + 1])
                                                : (float)s_in_stereo[2 * i + muse_board->mic_slot];
@@ -265,7 +301,15 @@ esp_err_t muse_audio_read(int16_t *mono, size_t frames)
         mono += n;
         frames -= n;
     }
+    if (!muse_settings_mic_on() || generation != muse_settings_mic_generation()) goto discard;
     return ESP_OK;
+
+discard:
+    memset(start, 0, total * sizeof(*start));
+    memset(s_in_stereo, 0, sizeof(s_in_stereo));
+    s_hpf_x1 = s_hpf_y1 = 0;
+    s_read_generation_valid = false;
+    return result;
 }
 
 esp_err_t muse_audio_write(const int16_t *mono, size_t frames)
