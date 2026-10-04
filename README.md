@@ -5,11 +5,11 @@ A weather-aware Muse companion for the **Seeed SenseCAP Watcher**. Hold to send 
 A community fork of [Meta's Muse Gadget SDK](https://github.com/facebookincubator/muse-gadget-sdk), with a quieter home screen, useful wheel navigation, camera review, and thirteen animated weather outfits. It uses the Muse app and your own [Gadget SDK token](https://gadgets.muse.ai/settings/sdk-tokens).
 
 <p align="center">
-  <img src="docs/media/device-weather-card.png" width="250" alt="Actual Watcher weather card with temperature above a furry Muse wearing shorts">
+  <img src="examples/weather-card.jpg" width="250" alt="Example weather card with temperature above a furry Muse wearing shorts">
   <img src="docs/media/tap-reaction.gif" width="250" alt="Pixel Muse raises its arms, smiles, bounces with hearts, then returns to idle">
 </p>
 
-*Left: a USB capture of a weather card on the Watcher, with historical example values. Right: the production animation renderer with a simulated tap. [Media details and videos](docs/media/README.md).*
+*Left: a locally rendered card with synthetic weather values. Right: the production animation renderer with a simulated tap. Both use the current artwork. [Media details and videos](docs/media/README.md).*
 
 ## What it does
 
@@ -77,6 +77,7 @@ All **13 original PNGs**, the selection rules, generated RGB565 sprites, and ani
 
 - [Downloadable artwork and catalog](assets/weather/)
 - [Every outfit: idle and excited](docs/media/outfit-reactions.png)
+- [Artwork before and after regeneration](docs/media/artwork-before-after.png)
 - [Reuse, render, and customize the assets](docs/assets.md)
 - [Weather and tap animation source](esp32/components/muse/muse_wardrobe.c)
 

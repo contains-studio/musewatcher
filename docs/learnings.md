@@ -10,6 +10,12 @@ The wardrobe renderer requires the tracked `esp32/components/muse/wardrobe_asset
 
 The thirteen outfit IDs are shared by the catalog, firmware command schema, saved NVS setting, and renderer. Their order also matches the happy-pose anchor table. Replacing artwork or reordering the generated assets requires inspecting every neutral and happy pose. An asset count assertion alone cannot detect a reordered eye or shoulder anchor.
 
+## Pixel art must survive its final display size
+
+The first generated outfit images contained a thin tiled lattice across the face, fur, and clothes. Nearest-neighbor reduction to 72 pixels tall made those lines alias into thick stripes. The artifacts were already present in the idle sprite; changing display scaling could not repair the source. Regenerating all thirteen outfits with broad color areas and stepped silhouettes removed the grid while retaining the cream fur and weather clothing.
+
+Inspect both the full source image and the converted RGB565 sprite. After changing artwork, remeasure eye, mouth, and sleeve bounds in the cropped sprite's coordinates. The happy mouth needs its own bounds; inferring it from the eyes can leave parts of the old smile visible. Erasing facial marks by copying one neighboring color into each half of a row can also introduce a seam. The renderer interpolates between the clean skin samples on either side instead. Check both expressions for every outfit, including the return to idle.
+
 The default procedural renderer uses `localtime_r` for its day-period calculation. The app sets the POSIX timezone from `CONFIG_MUSE_TIME_ZONE`, which defaults to `UTC0`; `watcher.py configure --timezone` lets an owner change it. It does not discover a timezone from weather or location. An external weather job uses its own scheduler timezone, commonly an IANA name, independently. The dressed renderer's scenery comes from the outfit ID, independently of the procedural renderer's weather hook.
 
 ## Profiles must describe the feature that ships

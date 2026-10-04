@@ -26,24 +26,31 @@ typedef struct { int16_t x, y, w, h; uint16_t color; } pixel_rect_t;
 static pixel_rect_t s_effects[96];
 static unsigned s_effect_count;
 
-/* Source-art anchors: inclusive eye bounds, then shoulder and arm end. These
+/* Source-art anchors: inclusive eye/mouth bounds, then shoulder and arm end. These
  * move the original sleeves/fur instead of swapping away the chosen outfit.
  * Like scenery, the happy pose is latched on the UI thread for all strips. */
-typedef struct { uint8_t lx0, lx1, rx0, rx1, ey0, ey1, shoulder, arm_end, arm_width, arm_taper; } happy_rig_t;
+typedef struct {
+    uint8_t lx0, lx1, rx0, rx1, ey0, ey1;
+    uint8_t mx0, mx1, my0, my1;
+    uint8_t shoulder, arm_end, arm_width, arm_taper;
+    const uint8_t *arm_cuts; /* Optional silhouette widths from shoulder to end. */
+} happy_rig_t;
+/* The crochet sleeves flare around the red bands instead of tapering evenly. */
+static const uint8_t s_crochet_cuts[] = {11,11,11,11,11,11,12,13,13,11,12,12,12,8,8,8,7};
 static const happy_rig_t s_rigs[] = {
-    {21,25,34,38,18,22,31,46,11,1}, /* mild-knit */
-    {22,26,35,40,19,23,31,46,11,1}, /* warm-crochet */
-    {20,24,33,37,18,22,31,46,11,1}, /* cool-suede */
-    {19,24,32,36,24,28,35,47,11,1}, /* cold-layers */
-    {21,25,34,38,18,22,31,46,11,1}, /* wind-shell */
-    {20,24,33,37,20,24,31,46,11,1}, /* rain-shell */
-    {20,24,33,38,21,25,31,47,11,1}, /* heatwave-linen */
-    {20,25,33,38,22,27,36,52,10,0}, /* freezing-puffer: wide mittens */
-    {18,22,31,35,20,24,31,47,11,1}, /* cold-rain-parka */
-    {20,24,32,36,20,24,31,46,11,1}, /* fog-overshirt */
-    {19,23,33,37,19,23,31,47,11,1}, /* warm-rain-shell */
-    {20,24,33,37,20,24,31,47,11,1}, /* hot-wind-stripes */
-    {16,21,30,34,19,23,31,46,11,1}, /* hot-shorts */
+    {21,25,35,39,18,23,27,33,25,28,31,47,11,1,NULL}, /* mild-knit */
+    {21,25,35,40,18,23,27,33,25,28,31,47,11,1,s_crochet_cuts}, /* warm-crochet */
+    {21,25,35,39,18,23,27,33,25,28,31,47,11,1,NULL}, /* cool-suede */
+    {19,23,33,37,23,27,25,31,29,32,35,50,11,1,NULL}, /* cold-layers */
+    {21,25,35,39,19,23,27,33,25,28,31,47,11,1,NULL}, /* wind-shell */
+    {19,23,32,36,21,25,25,31,27,30,34,48,11,1,NULL}, /* rain-shell */
+    {20,24,34,39,21,26,26,32,28,31,34,50,11,1,NULL}, /* heatwave-linen */
+    {20,24,34,38,22,27,26,32,29,32,36,52,10,0,NULL}, /* freezing-puffer */
+    {18,23,32,37,21,25,25,31,27,30,35,50,11,1,NULL}, /* cold-rain-parka */
+    {20,25,34,39,22,26,27,33,28,31,35,50,11,1,NULL}, /* fog-overshirt */
+    {19,23,33,38,19,24,26,32,26,29,34,51,11,1,NULL}, /* warm-rain-shell */
+    {21,25,35,40,21,25,28,34,27,30,35,50,11,1,NULL}, /* hot-wind-stripes */
+    {17,22,32,37,19,24,24,30,26,29,35,50,11,1,NULL}, /* hot-shorts */
 };
 _Static_assert(sizeof(s_rigs) / sizeof(s_rigs[0]) == MUSE_WARDROBE_ASSET_COUNT,
                "each outfit needs happy-pose anchors");
@@ -187,16 +194,30 @@ static float unit(float value)
     return !isfinite(value) || value < 0 ? 0 : value > 1 ? 1 : value;
 }
 
-static bool arm_pixel(const happy_rig_t *rig, int x, int y, int width)
+static bool arm_pixel(const happy_rig_t *rig, int x, int y, int width, int height)
 {
-    if (x < 0 || x >= width || y < rig->shoulder || y > rig->arm_end) return false;
-    int cut = rig->arm_width - (y - rig->shoulder) / 4 * rig->arm_taper;
+    if (x < 0 || x >= width || y < rig->shoulder || y > rig->arm_end || y >= height) return false;
+    int cut = rig->arm_cuts ? rig->arm_cuts[y - rig->shoulder]
+        : rig->arm_width - (y - rig->shoulder) / 4 * rig->arm_taper;
     return x < cut || x >= width - cut;
 }
 
 static int rounded_fixed(int value)
 {
     return (value + (value >= 0 ? 128 : -128)) / 256;
+}
+
+/* Interpolate skin between clean pixels bordering each facial mark. Copying
+ * one color into each half of a row left a hard seam in the face's shading. */
+static uint16_t face_fill(const muse_wardrobe_asset_t *asset, int x0, int x1, int x, int y)
+{
+    uint16_t a = asset->pixels[y * asset->width + x0 - 1];
+    uint16_t b = asset->pixels[y * asset->width + x1 + 1];
+    unsigned span = (unsigned)(x1 - x0 + 2), right = (unsigned)(x - x0 + 1), left = span - right;
+    unsigned r = ((a >> 11) * left + (b >> 11) * right + span / 2) / span;
+    unsigned g = (((a >> 5) & 63) * left + ((b >> 5) & 63) * right + span / 2) / span;
+    unsigned blue = ((a & 31) * left + (b & 31) * right + span / 2) / span;
+    return (uint16_t)((r << 11) | (g << 5) | blue);
 }
 
 /* Sample the small animated rig in source coordinates. Scaling caches repeated
@@ -210,30 +231,28 @@ static uint16_t happy_pixel(const muse_wardrobe_asset_t *asset,
         int sine = side ? -s_arm_sin : s_arm_sin;
         int sx = pivot + rounded_fixed(dx * s_arm_cos + dy * sine);
         int sy = rig->shoulder + rounded_fixed(-dx * sine + dy * s_arm_cos);
-        if (arm_pixel(rig, sx, sy, asset->width)
+        if (arm_pixel(rig, sx, sy, asset->width, asset->height)
             && (side ? sx >= asset->width / 2 : sx < asset->width / 2)) {
             uint16_t pixel = asset->pixels[sy * asset->width + sx];
             if (pixel) return pixel;
         }
     }
     if (x < 0 || x >= asset->width || y < 0 || y >= asset->height
-        || arm_pixel(rig, x, y, asset->width)) return 0;
+        || arm_pixel(rig, x, y, asset->width, asset->height)) return 0;
 
-    /* Replace only facial marks. Nearby pixels on the same row retain the
-     * face's warm shading; the surrounding cream fur stays untouched. */
+    /* Replace only the anchored marks; the surrounding fur stays untouched. */
     int x0 = -1, x1 = -1, y0 = rig->ey0, y1 = rig->ey1;
     bool eye = y >= y0 && y <= y1;
     if (eye && x >= rig->lx0 && x <= rig->lx1) { x0 = rig->lx0; x1 = rig->lx1; }
     else if (eye && x >= rig->rx0 && x <= rig->rx1) { x0 = rig->rx0; x1 = rig->rx1; }
     else {
         eye = false;
-        int center = (rig->lx0 + rig->lx1 + rig->rx0 + rig->rx1) / 4;
-        y0 = rig->ey1 + 2; y1 = y0 + 3;
-        if (x >= center - 3 && x <= center + 3 && y >= y0 && y <= y1) {
-            x0 = center - 3; x1 = center + 3;
+        y0 = rig->my0; y1 = rig->my1;
+        if (x >= rig->mx0 && x <= rig->mx1 && y >= y0 && y <= y1) {
+            x0 = rig->mx0; x1 = rig->mx1;
         }
     }
-    if (x0 >= 0) {
+    if (x0 > 0 && x1 + 1 < asset->width) {
         int u = x - x0, v = y - y0, width = x1 - x0 + 1;
         if (eye) {
             int arch = (u == 0 || u == width - 1) ? 2 : 1;
@@ -244,8 +263,7 @@ static uint16_t happy_pixel(const muse_wardrobe_asset_t *asset,
                 || (v == 2 && u > 1 && u < width - 2)) return RGB565(56, 35, 24);
             if (v == 2 && (u == 1 || u == width - 2)) return PINK;
         }
-        int sample_x = u < width / 2 ? x0 - 1 : x1 + 1;
-        return asset->pixels[y * asset->width + sample_x];
+        return face_fill(asset, x0, x1, x, y);
     }
     return asset->pixels[y * asset->width + x];
 }

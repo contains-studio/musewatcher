@@ -1,8 +1,11 @@
 # Weather images and animations
 
 The [weather catalog](../assets/weather/catalog.json) contains thirteen outfits
-for temperature, precipitation, fog, and wind. Each original is a 1254×1254 PNG
-with a black background. The catalog, PNGs, and
+for temperature, precipitation, fog, and wind. Each source is a full-body PNG
+with a black background. The regenerated art uses broad color areas without
+tile-grid texture, so faces stay clean at the firmware's 72-pixel sprite height.
+The [generation prompts](../assets/weather/PROMPTS.md) describe each outfit.
+The catalog, PNGs, and
 [selection rules](../assets/weather/weather-rules.json) live together in
 `assets/weather/`; the skill and firmware tools share that one copy.
 

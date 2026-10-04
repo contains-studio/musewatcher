@@ -1,7 +1,9 @@
 """Compile and exercise the production wardrobe renderer; no ESP-IDF or device."""
 import ctypes
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -165,9 +167,10 @@ class WardrobeTests(unittest.TestCase):
         self.assertFalse(self.lib.muse_wardrobe_scale(None, 2, 0, 1, 0, 1, 96))
 
     def test_strip_output_matches_full_frame_at_ui_sizes(self):
-        for size, happy in ((size, happy) for size in (256, 320, 512) for happy in (0, 1)):
-            with self.subTest(size=size, happy=happy):
-                full = self.frame(size=size, t=1.3, happy=happy)
+        for outfit, size, happy in ((outfit, size, happy) for outfit in preview.OUTFITS
+                                     for size in (256, 320, 512) for happy in (0, 1)):
+            with self.subTest(outfit=outfit, size=size, happy=happy):
+                full = self.frame(outfit, size=size, t=1.3, happy=happy)
                 stripes = []
                 for y in range(0, size, 16):
                     end = min(y + 15, size - 1)
@@ -190,6 +193,31 @@ class WardrobeTests(unittest.TestCase):
                 self.assertEqual(list(output), expected)
         finally:
             worker.join()
+
+
+class WardrobeExpressionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.binary = Path(cls.temporary.name) / "wardrobe-expression"
+        subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-O1", "-g",
+                        "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined",
+                        "-fno-omit-frame-pointer",
+                        str(ESP32 / "tests/muse_wardrobe_expression_harness.c"),
+                        "-lm", "-o", str(cls.binary)], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def test_facial_fill_preserves_smooth_color_ramps(self):
+        subprocess.run([str(self.binary), "fill"], check=True)
+
+    def test_expression_anchors_cover_original_marks_and_preserve_surrounding_fur(self):
+        subprocess.run([str(self.binary), "anchors"], check=True)
+
+    def test_rotated_sampling_stays_inside_each_sprite(self):
+        subprocess.run([str(self.binary), "bounds"], check=True)
 
 
 if __name__ == "__main__":
