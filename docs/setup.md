@@ -118,13 +118,16 @@ Check that the firmware boots without repeated resets and that the app can reach
 | Tap the idle home | Pet Muse; the dressed character changes expression, raises its arms, and hops. |
 | Hold the home screen for about 0.4 seconds | Record while held; release to send. Dragging away or leaving home cancels. |
 | Hold the physical wheel | Push to talk. |
-| Turn the wheel during a reply | Read backward or forward; manual reading pauses automatic paging. Press to finish. |
+| Press the wheel once while thinking | Cancel the current upload or response wait and return home, even with the mic off. |
+| Turn the wheel during a reply | Read backward or forward; manual reading pauses automatic paging. Press to finish reading, or to cancel if still thinking. |
 | Turn the wheel at idle | Browse the latest card, last reply, or return to Muse. Press to open the selection. |
 | Swipe left / right | Open Settings / return home. |
 | Double-tap home or double-click the wheel | Open camera preview; repeat the camera action to freeze a frame. |
 | Touch a sleeping screen | Wake it; the waking touch does not also record or pet. |
 
 The idle home keeps the character low on the display. Replies appear above a smaller Muse and page automatically whether sound is on or off. The latest completed card and last reply are retained in RAM until restart. Settings → Sound controls the microphone and speaker; microphone mute cancels active recording and pauses queued voice notes.
+
+The **Press wheel to cancel** hint appears only while thinking. Use a short press, not a hold. Cancellation discards the active note instead of retrying it and closes the Watcher's response streams; Muse may still finish work it already received in the app. Other saved notes remain queued. A new hold starts a new recording normally.
 
 In camera preview, choose **Take photo**; in review, choose **Send photo**, **Retake**, or **×** to discard. Wheel rotation highlights an action and a press selects it. Turning alone never sends a photo. A failed send retains the frozen JPEG for an explicit retry. Camera images are separate messages, not automatic attachments to voice recordings. The camera uses the Watcher's existing Himax firmware; this build does not replace that firmware.
 
@@ -140,7 +143,17 @@ display.set_outfit {}
 display.set_outfit {"outfit_id":"default"}
 ```
 
-The first command persists a selection; the second queries it; `default` restores the procedural character. Selecting an outfit does not dismiss an existing image card. `display.show_animation {}` returns to the character, while `display.draw_url {"url":"<your card URL>"}` displays a card. These are device commands through Muse's existing connection, not public HTTP endpoints.
+The first command persists a selection; the second queries it; `default` restores the procedural character. Selecting an outfit does not dismiss an existing card. `display.show_animation {}` returns to the character while keeping **Latest card** available.
+
+For weather, prefer the advertised `display.weather` command. This **synthetic example** demonstrates its format:
+
+```text
+display.weather {"temp_f":79,"outfit_id":"hot-shorts","high_f":83,"low_f":61,"wind_mph":7,"humidity_pct":52}
+```
+
+The command requires a finite current temperature and supported outfit ID. High, low, wind, and humidity are optional; omit unknown fields. Temperatures must be −238 through 302°F, wind 0–400 mph, and humidity 0–100%; high must be at least low when both are present. See the [weather skill](../skills/muse-weather-display/SKILL.md) for selection and delivery details. Native cards display Fahrenheit/mph with pixel text above the animated character, save the outfit, and need no image upload. Other active workflows take priority before the forecast appears.
+
+`display.draw_url {"url":"<your card URL>"}` remains available for images and weather cards on older firmware. **Latest card** recalls whichever weather or image card last completed successfully; a failed replacement keeps the previous card. These are device commands through Muse's existing connection, not public HTTP endpoints.
 
 The weather selector takes current conditions supplied by a caller. From the repository root:
 
@@ -150,7 +163,7 @@ python skills/muse-weather-display/scripts/choose_outfit.py weather.json
 
 For example, an input file containing `{"conditions":["sunny"],"temp_f":72,"wind_mph":3}` selects the warm crochet outfit. The selector prefers feels-like temperature, falls back to current temperature, and applies precipitation rules before dry-weather rules. Its output includes the selected ID and asset path.
 
-The firmware does **not** fetch a forecast or create a daily schedule. Configure a weather source, location, and schedule in your own agent workflow. Use the same selected outfit for both the weather card and `display.set_outfit`. No location, device ID, account, or schedule is required to build the firmware. Outfit scenery follows the selected outfit; it is not an independent live weather observation.
+The firmware does **not** fetch a forecast or create a daily schedule. Configure a weather source, location, and schedule in your own agent workflow. Pass the selected outfit ID with `display.weather`. On older firmware, use the same selected outfit for the rendered image and `display.set_outfit`. No location, device ID, account, or schedule is required to build the firmware. Outfit scenery follows the selected outfit; it is not an independent live weather observation.
 
 To regenerate sprites after editing the bundled artwork, run from `esp32/`:
 
@@ -177,7 +190,7 @@ The committed Watcher profile enables `CONFIG_LV_USE_SNAPSHOT=y`. Capture the ac
 python tools/watcher.py screenshot --port PORT --output /tmp/watcher.png
 ```
 
-A 412 × 412 screenshot needs roughly 40 seconds to traverse the 115200-baud console, plus processing time. The helper supplies a 90-second timeout. Capture temporarily allocates a screen-sized RGB565 buffer and can wake the screen. Capture the feature being demonstrated and label forced poses or fixtures; do not present a simulator image as a hardware screenshot.
+A 412 × 412 screenshot needs roughly 40 seconds to traverse the 115200-baud console, plus processing time. The helper supplies a 90-second timeout. The UI captures one instant, copies it to an owned buffer, and releases LVGL's snapshot before a background task transfers it. Animation and controls continue during transfer; the received image is a frozen snapshot, not a recording of those changes. Only one transfer runs at a time, so wait for completion before requesting another. Capture temporarily needs screen-sized RGB565 storage and can wake the screen. Capture the feature being demonstrated and label forced poses or fixtures; do not present a simulator image as a hardware screenshot.
 
 ## Recovery and troubleshooting
 
@@ -189,6 +202,7 @@ A 412 × 412 screenshot needs roughly 40 seconds to traverse the 115200-baud con
 | Connected to Wi-Fi but no response from Muse | Verify pairing and the Muse session separately. Check the app and sanitized device status; Wi-Fi alone does not prove service availability. |
 | Photo upload times out | Delivery is uncertain until acknowledged. Check the app before explicitly retrying; do not blindly resend. |
 | Remote weather/card delivery times out | Inspect the display or other delivery evidence before resending. A timeout is not proof that the card was not displayed. |
+| An uploaded weather image fails with an HTTPS memory error | Use native `display.weather` when advertised; it sends values without downloading an image. Keep `draw_url` for custom images or older firmware. Repeated image retries do not fix memory pressure. |
 | Serial command unexpectedly resets or fails | Close other serial tools. `tools/muse/monitor.py` deliberately resets the board before reading its log. |
 | Screenshot reports `SNAP OFF` | Check `CONFIG_LV_USE_SNAPSHOT=y` in the active Watcher configuration, rebuild, and flash. An older generated configuration may override the current profile. |
 

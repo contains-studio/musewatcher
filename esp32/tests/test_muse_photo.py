@@ -98,6 +98,8 @@ static bool muse_hatch_turn_caption(size_t played, char *text, size_t cap) {
     (void)played; (void)text; (void)cap; return false;
 }
 static bool got_event(int type) { (void)type; return cancel; }
+static bool cancel_thinking(void) { return false; } /* dedicated cancel has its own production harness */
+static bool finish_turn(void) { return false; }
 static void muse_hatch_turn_cancel(void) { cancellations++; }
 static size_t muse_hatch_turn_read(int16_t *pcm, size_t n, int wait) {
     (void)pcm; (void)n; (void)wait; return 0;
@@ -283,7 +285,7 @@ MIC_FAKES = r'''
 #define ESP_CODEC_DEV_OK 0
 #define MUSE_MODE_THINKING 1
 typedef int esp_err_t;
-typedef enum { FED, FEED_FAILED, FEED_PRESSED, FEED_MUTED } feed_t;
+typedef enum { FED, FEED_FAILED, FEED_PRESSED, FEED_MUTED, FEED_CANCELLED } feed_t;
 typedef enum { MUSE_HATCH_EV_NONE, MUSE_HATCH_EV_ERROR } muse_hatch_ev_t;
 typedef struct { int16_t pcm[MUSE_AUDIO_CHUNK]; } pre_chunk_t;
 static pre_chunk_t pre[PRE_CHUNKS], *s_pre = pre;
@@ -315,6 +317,8 @@ static float muse_audio_dbfs(const int16_t *pcm, size_t n) { (void)pcm; (void)n;
 static int64_t esp_timer_get_time(void) { static int64_t t; return t += 1000; }
 static muse_hatch_ev_t muse_hatch_turn_event(char *text, size_t cap) { (void)text; (void)cap; return MUSE_HATCH_EV_NONE; }
 static bool press_waiting(void) { return false; }
+static bool cancel_thinking(void) { return false; } /* exercised in test_muse_voice_cancel.py */
+static bool finish_turn(void) { return false; }
 static size_t muse_hatch_turn_audio_wait(const int16_t *pcm, size_t n, int ms) {
     (void)pcm; (void)ms; writes++; if (writes == write_toggle_at) toggle(); return n > 2 ? 2 : n;
 }

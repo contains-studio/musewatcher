@@ -76,6 +76,7 @@
 #include "muse_wardrobe.h"
 #include "muse_wardrobe_settings.h"
 #include "muse_ui.h"
+#include "muse_weather_command.h"
 #endif
 #if CONFIG_MUSE_ENABLED
 #include "muse_glue.h"
@@ -1847,6 +1848,9 @@ static cJSON *on_ws_command(
         return queue_ws_control(WS_CONTROL_SET_VM, url);
     }
 #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+    if (strcmp(command, "display.weather") == 0) {
+        return muse_weather_command(params);
+    }
     if (strcmp(command, "display.set_outfit") == 0) {
         if (params && !cJSON_IsObject(params)) {
             return command_error("invalid_params", "expected an object with optional outfit_id");

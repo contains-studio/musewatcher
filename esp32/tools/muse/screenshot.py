@@ -50,6 +50,8 @@ class Snapshot:
             raise CaptureError("Unexpected input after snapshot completion.")
         if clean == b"SNAP OFF":
             raise CaptureError("Screenshots are disabled in the running firmware.")
+        if clean == b"SNAP ERROR":
+            raise CaptureError("The Watcher could not start a screenshot. Retry when idle.")
         header = HEADER.fullmatch(clean)
         if header:
             if self.started:
@@ -186,6 +188,11 @@ def self_test():
 
     class Tests(unittest.TestCase):
         raw = bytes(range(256)) * (412 * 412 * 2 // 256) + bytes(range((412 * 412 * 2) % 256))
+
+        def test_device_capture_failure_is_immediate(self):
+            for marker in (b"SNAP ERROR", b"SNAP OFF"):
+                with self.assertRaises(CaptureError):
+                    Snapshot().feed(marker)
 
         def test_complete_frame_with_private_interleaved_logs(self):
             snap = Snapshot()

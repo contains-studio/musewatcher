@@ -108,6 +108,7 @@ static int xQueueReceive(void *q, muse_input_event_t *e, int wait) {
     return pdTRUE;
 }
 static void muse_state_poke(void) {}
+static void begin_turn(void) {} /* dedicated cancellation is tested in test_muse_voice_cancel.py */
 static bool mic_current(uint32_t generation) {
     (void)generation; return mute_at < 0 || reads < mute_at;
 }

@@ -34,6 +34,12 @@
  */
 esp_err_t muse_voice_start(QueueHandle_t queue);
 
+/* Capture at the start of a gesture. Zero means there is no THINKING turn. */
+uint32_t muse_voice_thinking_turn(void);
+/* Cancel only that captured THINKING turn, without starting a recording. The
+ * voice task closes local streams; a request already sent may finish in Muse. */
+bool muse_voice_cancel_thinking(uint32_t generation);
+
 typedef void (*muse_photo_sent_cb_t)(bool sent, const char *error, void *ctx);
 /*
  * Explicitly sends this JPEG, then shows Muse's reply through the voice UI.

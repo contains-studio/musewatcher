@@ -41,6 +41,7 @@ FAKES = r'''
 #define MUSE_LINK_CONFIRM 1
 #define MUSE_MODE_IDLE 1
 #define WATCHER_CAMERA_CLOSED 0
+#define WATCHER_CAMERA_SENDING 5
 #define MUSE_PTT_DOWN 1
 #define MUSE_PTT_UP 2
 #define MUSE_MENU_SELECT 1
@@ -48,6 +49,7 @@ FAKES = r'''
 static bool s_talk_down;
 static int camera, asleep, menu, link;
 static unsigned long long now;
+static unsigned thinking_turn;
 static struct { const char *talk_button; } board = {"wheel"}, *muse_board = &board;
 static int watcher_camera_state(void) { return camera; }
 static bool muse_state_asleep(void) { return asleep; }
@@ -55,7 +57,10 @@ static bool muse_menu_is_open(void) { return menu; }
 static int muse_link_state(void) { return link; }
 static int64_t esp_timer_get_time(void) { return (int64_t)now * 1000; }
 static void muse_state_poke(void) {}
-static void muse_ui_wheel_click(void) { puts("click"); }
+static uint32_t muse_voice_thinking_turn(void) { return thinking_turn; }
+static void muse_ui_wheel_click(uint32_t turn) {
+    if (turn) printf("click turn=%u\n", turn); else puts("click");
+}
 static void watcher_camera_preview_toggle(void) { puts("camera"); camera = 1; }
 static bool muse_link_talk_press(void) {
     if (link) { puts("pair"); link = 0; return true; } return false;
@@ -72,7 +77,7 @@ static void post(int event, bool wake) {
 MAIN = r'''
 int main(void) {
     unsigned edges;
-    while (scanf("%llu %u %d %d %d %d", &now, &edges, &camera, &asleep, &menu, &link) == 6)
+    while (scanf("%llu %u %d %d %d %d %u", &now, &edges, &camera, &asleep, &menu, &link, &thinking_turn) == 7)
         talk_button(edges);
     return 0;
 }
@@ -102,8 +107,8 @@ class WheelGestureTest(unittest.TestCase):
         cls.temp.cleanup()
 
     def run_edges(self, steps):
-        # timestamp, edge bits, camera open, asleep, menu open, pairing pending
-        data = "".join(" ".join(map(str, (*row, *([0] * (6 - len(row)))))) + "\n" for row in steps)
+        # timestamp, edge bits, camera state, asleep, menu, pairing, thinking generation
+        data = "".join(" ".join(map(str, (*row, *([0] * (7 - len(row)))))) + "\n" for row in steps)
         result = subprocess.run([str(self.binary)], input=data, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.splitlines()
@@ -127,6 +132,21 @@ class WheelGestureTest(unittest.TestCase):
 
     def test_single_tap_waits_for_second_click_then_pets(self):
         self.assertEqual(self.run_edges([(10, 1), (60, 2), (410, 0), (411, 0), (900, 0)]), ["click"])
+
+    def test_delayed_cancel_keeps_turn_from_physical_press(self):
+        self.assertEqual(self.run_edges([(10,1,0,0,0,0,7),(60,2,0,0,0,0,7),
+                                        (200,0,0,0,0,0,8),(411,0,0,0,0,0,8)]), ["click turn=7"])
+
+    def test_idle_press_does_not_cancel_a_turn_that_starts_later(self):
+        self.assertEqual(self.run_edges([(10,1),(60,2,0,0,0,0,8),(411,0,0,0,0,0,8)]), ["click"])
+
+    def test_expired_tap_and_new_press_keep_separate_turns(self):
+        self.assertEqual(self.run_edges([(10,1,0,0,0,0,7),(60,2,0,0,0,0,7),
+                                        (500,1,0,0,0,0,8),(550,2,0,0,0,0,8),(901,0,0,0,0,0,8)]),
+                         ["click turn=7", "click turn=8"])
+
+    def test_camera_review_click_does_not_capture_background_turn(self):
+        self.assertEqual(self.run_edges([(10,1,4,0,0,0,7),(60,2,4,0,0,0,7),(411,0,4,0,0,0,7)]), ["click"])
 
     def test_camera_wheel_hold_and_double_click_never_record(self):
         self.assertEqual(self.run_edges([(10, 1, 1), (1000, 0, 1), (1100, 2, 1),

@@ -71,6 +71,38 @@ static volatile float s_monitor_db = -100.0f;
 static volatile bool s_chirp;
 static volatile bool s_loopback;
 static volatile bool s_mp3test;
+/* Generation and acceptance share one atomic word: a terminal owner closes
+ * the gate before saving/retrying, and honors every cancel accepted before it. */
+#define TURN_OPEN 1u
+#define TURN_CANCEL 2u
+#define TURN_FLAGS (TURN_OPEN | TURN_CANCEL)
+#define TURN_STEP 4u
+static atomic_uint s_turn_control = TURN_STEP | TURN_OPEN;
+static bool s_turn_cancelled;
+
+static void begin_turn(void)
+{
+    unsigned generation = (atomic_load(&s_turn_control) & ~TURN_FLAGS) + TURN_STEP;
+    if (!generation) generation = TURN_STEP;
+    atomic_store(&s_turn_control, generation | TURN_OPEN);
+    s_turn_cancelled = false;
+}
+
+uint32_t muse_voice_thinking_turn(void)
+{
+    unsigned control = atomic_load(&s_turn_control);
+    if (!(control & TURN_OPEN) || muse_state_mode(NULL) != MUSE_MODE_THINKING) return 0;
+    return control == atomic_load(&s_turn_control) ? control & ~TURN_FLAGS : 0;
+}
+
+bool muse_voice_cancel_thinking(uint32_t generation)
+{
+    if (!generation || generation != muse_voice_thinking_turn()) return false;
+    unsigned expected = generation | TURN_OPEN;
+    if (!atomic_compare_exchange_strong(&s_turn_control, &expected, expected | TURN_CANCEL)) return false;
+    muse_state_nudge();
+    return true;
+}
 
 typedef struct {
     uint8_t *jpeg;
@@ -321,6 +353,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
     if (s_record_cancelled) goto cancelled;
     if (!mic_current(s_rec_mic_generation)) goto muted;
     muse_state_set_mode(MUSE_MODE_LISTENING);
+    begin_turn();
     muse_state_set_progress(0);
     s_rec_n = s_sent = 0;
     s_live = s_tried = false;
@@ -434,6 +467,30 @@ discarded:
 
 static void go_idle(const char *caption);
 
+static void cancel_turn(void)
+{
+    s_turn_cancelled = true;
+    muse_hatch_turn_cancel();
+    pre_reset();
+    muse_state_set_level(0);
+    go_idle("");
+}
+
+/* The voice task is the sole owner; UI cancellation races only with this
+ * atomic close. Once closed, no caller can receive an accepted late cancel. */
+static bool finish_turn(void)
+{
+    unsigned control = atomic_fetch_and(&s_turn_control, ~TURN_FLAGS);
+    if (control & TURN_CANCEL) cancel_turn();
+    return s_turn_cancelled;
+}
+
+static bool cancel_thinking(void)
+{
+    if (!(atomic_load(&s_turn_control) & TURN_CANCEL)) return false;
+    return finish_turn();
+}
+
 /*
  * Plays Hatch's reply as it arrives, with its text as the caption. Returns
  * true if interrupted by a new press. *delivered: the VM has the note.
@@ -451,8 +508,10 @@ static bool hatch_reply(bool *delivered, photo_request_t *photo)
     int64_t t0 = esp_timer_get_time();
     *delivered = false;
     for (;;) {
+        if (cancel_thinking()) goto cancelled;
         muse_hatch_ev_t ev;
         while ((ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
+            if (cancel_thinking()) goto cancelled;
             switch (ev) {
             case MUSE_HATCH_EV_HEARD:
                 if (!speaking && !replied) {
@@ -476,6 +535,7 @@ static bool hatch_reply(bool *delivered, photo_request_t *photo)
                 done = *delivered = true;
                 break;
             case MUSE_HATCH_EV_ERROR:
+                if (finish_turn()) goto cancelled;
                 ESP_LOGW(TAG, "muse: %s", text);
                 muse_state_set_level(0);
                 photo_complete(photo, false, text);
@@ -485,7 +545,9 @@ static bool hatch_reply(bool *delivered, photo_request_t *photo)
                 break;
             }
         }
+        if (cancel_thinking()) goto cancelled;
         if (got_event(MUSE_PTT_DOWN)) {
+            if (finish_turn()) goto cancelled;
             ESP_LOGI(TAG, "reply interrupted");
             muse_hatch_turn_cancel();
             muse_state_set_level(0);
@@ -493,12 +555,14 @@ static bool hatch_reply(bool *delivered, photo_request_t *photo)
             return true;
         }
         if (photo && photo->callback && esp_timer_get_time() - t0 > ACK_WAIT_US) {
+            if (finish_turn()) goto cancelled;
             muse_hatch_turn_cancel();
             photo_complete(photo, false, "PHOTO SEND NOT CONFIRMED");
             go_idle("PHOTO SEND NOT CONFIRMED");
             return false;
         }
         size_t n = muse_hatch_turn_read(buf, MUSE_AUDIO_CHUNK, speaking || done ? 0 : 20);
+        if (cancel_thinking()) goto cancelled;
         if (n) {
             if (!speaking) {
                 speaking = true;
@@ -521,13 +585,20 @@ static bool hatch_reply(bool *delivered, photo_request_t *photo)
         }
     }
     muse_state_set_level(0);
-    photo_complete(photo, false, "PHOTO SEND NOT CONFIRMED");
     ESP_LOGI(TAG, "muse reply: %.2fs of audio, %.2fs total", (double)played / MUSE_AUDIO_RATE,
              (esp_timer_get_time() - t0) / 1e6);
     if (!played) {
         /* No speech (TTS unavailable): leave the reply text up for a moment. */
-        vTaskDelay(pdMS_TO_TICKS(2500));
+        for (int ms = 0; ms < 2500; ms += 50) {
+            if (cancel_thinking()) goto cancelled;
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
     }
+    if (finish_turn()) goto cancelled;
+    photo_complete(photo, false, "PHOTO SEND NOT CONFIRMED");
+    return false;
+cancelled:
+    photo_complete(photo, false, "PHOTO SEND CANCELLED");
     return false;
 }
 
@@ -663,6 +734,7 @@ typedef enum {
     FEED_FAILED,    /* the turn failed, or Hatch stopped taking audio */
     FEED_PRESSED,   /* a press is queued: it goes first */
     FEED_MUTED,     /* microphone toggled: discard a new partial, keep saved notes */
+    FEED_CANCELLED, /* wheel click: discard this turn, keep unrelated saved notes */
 } feed_t;
 
 /*
@@ -674,9 +746,11 @@ static feed_t feed_rest(const int16_t *pcm, size_t frames, size_t *sent, bool yi
     char text[96];
     int64_t moved = esp_timer_get_time();
     for (;;) {
+        if (cancel_thinking()) return FEED_CANCELLED;
         if (!mic_current(mic_generation)) return FEED_MUTED;
         muse_hatch_ev_t ev;
         while ((ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
+            if (cancel_thinking()) return FEED_CANCELLED;
             if (ev == MUSE_HATCH_EV_ERROR) {
                 ESP_LOGW(TAG, "muse: %s", text);
                 return FEED_FAILED;
@@ -690,6 +764,7 @@ static feed_t feed_rest(const int16_t *pcm, size_t frames, size_t *sent, bool yi
         }
         size_t n = muse_hatch_turn_audio_wait(pcm + *sent, frames - *sent, 100);
         *sent += n;
+        if (cancel_thinking()) return FEED_CANCELLED;
         if (!mic_current(mic_generation)) return FEED_MUTED;
         int64_t now = esp_timer_get_time();
         if (n) {
@@ -710,8 +785,10 @@ static bool wait_delivered(void)
     char text[96];
     int64_t give_up = esp_timer_get_time() + ACK_WAIT_US;
     while (esp_timer_get_time() < give_up) {
+        if (cancel_thinking()) return false;
         muse_hatch_ev_t ev;
         while ((ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
+            if (cancel_thinking()) return false;
             if (ev == MUSE_HATCH_EV_SENT || ev == MUSE_HATCH_EV_REPLY || ev == MUSE_HATCH_EV_DONE) {
                 return true;
             }
@@ -736,6 +813,7 @@ static bool send_held(bool quiet)
 {
     uint32_t mic_generation = muse_settings_mic_generation();
     if (!mic_current(mic_generation)) return false;
+    begin_turn();
     held_note_t *h = &s_held[0];
     ESP_LOGI(TAG, "sending a saved note%s: %.1fs, from %llds ago, try %d", quiet ? " (asleep)" : "",
              (double)h->frames / MUSE_AUDIO_RATE, (long long)((esp_timer_get_time() - h->at_us) / 1000000),
@@ -752,6 +830,10 @@ static bool send_held(bool quiet)
         delivered = wait_delivered();
     } else if (fed == FED) {
         interrupted = hatch_reply(&delivered, NULL);
+    }
+    if (finish_turn()) {
+        drop_oldest();
+        return false;
     }
     if (fed != FED || quiet) {
         muse_hatch_turn_cancel();   /* asleep, the reply is left for the app */
@@ -834,14 +916,17 @@ static bool finish_note(void)
             muse_state_set_mode(MUSE_MODE_THINKING);
             muse_state_set_caption("SENDING VOICE NOTE");
             fed = feed_rest(s_rec, s_rec_n, &s_sent, false, s_rec_mic_generation) == FED;
-            if (!fed) {
-                muse_hatch_turn_cancel();
-            }
         }
         if (fed) {
             interrupted = hatch_reply(&delivered, NULL);
         }
-        if (!mic_current(s_rec_mic_generation)) goto muted;
+        bool mic_on = mic_current(s_rec_mic_generation);
+        if (finish_turn()) {
+            drop_rec();
+            return false;
+        }
+        if (!mic_on) goto muted;
+        if (s_live && !fed) muse_hatch_turn_cancel();
         if (delivered || interrupted) {
             drop_rec();
         } else {
@@ -852,12 +937,15 @@ static bool finish_note(void)
 #endif
     muse_hatch_turn_end();   /* before the chirp, which takes ~90 ms */
     muse_audio_chirp(0);
-    return hatch_reply(&delivered, NULL);
+    bool interrupted = hatch_reply(&delivered, NULL);
+    return finish_turn() ? false : interrupted;
 muted:
-    muse_hatch_turn_cancel();
+    if (!finish_turn()) {
+        muse_hatch_turn_cancel();
+        pre_reset();
+        go_idle("MIC OFF");
+    }
     drop_rec();
-    pre_reset();
-    go_idle("MIC OFF");
     return false;
 }
 
@@ -908,18 +996,24 @@ static void voice_task(void *arg)
     bool pending_down = false;
     if (muse_settings_mic_on()) muse_audio_selftest();
     for (;;) {
+        if (cancel_thinking()) continue;
+        if (!(atomic_load(&s_turn_control) & TURN_OPEN)) begin_turn();
 #if CONFIG_MUSE_HATCH
         photo_request_t photo;
         if (!pending_down && xQueueReceive(s_photos, &photo, 0) == pdTRUE) {
+            begin_turn();
             set_resting(false);
             muse_wifi_power(MUSE_WIFI_FULL);
             if (!muse_chat_photo_turn(photo.jpeg, photo.len)) {
                 free(photo.jpeg);
-                photo_complete(&photo, false, muse_hatch_ready() ? "MUSE IS BUSY" : not_ready_reason());
+                const char *why = finish_turn() ? "PHOTO SEND CANCELLED"
+                    : muse_hatch_ready() ? "MUSE IS BUSY" : not_ready_reason();
+                photo_complete(&photo, false, why);
             } else {
                 photo.jpeg = NULL;   /* the session task owns and frees the upload */
                 bool delivered;
                 pending_down = hatch_reply(&delivered, &photo);
+                if (finish_turn()) pending_down = false;
                 pre_reset();
                 if (!pending_down && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
                     if (delivered) muse_state_make_happy();
