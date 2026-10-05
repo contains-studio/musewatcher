@@ -1,0 +1,27 @@
+HTTPS weather-card delivery on a physical SenseCAP Watcher
+Source: a96a15ad3f178672501664bc8dd0e95cb4f87515
+
+Before fix (live retry; original firmware):
+image download refused int=19K/12K min=6K dma=18K/12K min=6K
+Result: out_of_memory before connecting
+
+After fix, first download:
+heartbeat-memory int=20K/12K dma=18K/12K psram=3591K
+image download start int=19K/12K min=8K dma=18K/12K min=8K
+image download connected int=15K/12K min=8K dma=14K/12K min=8K
+image download done: jpeg 412x412 (1/1) 24470 bytes in 1241 ms, stack 4232 free
+image download end int=19K/12K min=8K dma=17K/12K min=8K
+heartbeat-memory int=20K/12K dma=18K/12K psram=2919K
+heartbeat-memory int=20K/12K dma=18K/12K psram=2919K
+
+After fix, repeat download:
+image download start int=19K/12K min=8K dma=18K/12K min=8K
+heartbeat-memory int=16K/12K dma=14K/12K psram=2873K
+image download connected int=16K/12K min=8K dma=14K/12K min=8K
+image download done: jpeg 412x412 (1/1) 24470 bytes in 1034 ms, stack 4280 free
+image download end int=19K/12K min=8K dma=17K/12K min=8K
+heartbeat-memory int=20K/12K dma=18K/12K psram=2919K
+
+Only download/memory diagnostics retained. Unrelated serial output, device IDs,
+network identifiers, signed URLs, and Muse conversation text are omitted.
+These are recorded firmware diagnostics, not a simulated transfer.
