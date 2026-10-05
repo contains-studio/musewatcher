@@ -24,8 +24,9 @@ configurations exercise the measured pressure, refusals, allocation failures,
 cleanup, redirects and deadlines. The final host suite passed 327 tests with
 3 skips, and both Watcher and AIPI firmware builds passed.
 
-No continuous hardware video was captured: USB framebuffer capture pauses the
-main UI task for roughly 40 seconds, and no external camera was available.
+No continuous hardware video was captured: that revision's USB framebuffer
+capture paused the main UI task for roughly 40 seconds, and no external camera was available.
+The newer background transfer is documented in [native weather evidence](../native-weather/README.md).
 The screenshot and recorded serial workflow provide the hardware evidence.
 The cancellation video elsewhere in this PR demonstrates the separate wheel
 control change; it is not evidence of this HTTPS download.

@@ -18,6 +18,7 @@
 #include "muse_ui.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "lvgl.h"
-#include "mbedtls/base64.h"
+#include "muse_snapshot.h"
 #include "src/draw/lv_image_decoder_private.h"   /* custom decoder */
 #include "src/misc/lv_area_private.h"            /* lv_area_intersect, for the ring */
 
@@ -49,8 +50,9 @@
 #include "muse_touch_gesture.h"
 #include "muse_text.h"
 #include "freertos/queue.h"
-#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER || CONFIG_MUSE_BOARD_SIMULATOR
 #include "muse_wardrobe.h"
+#include "muse_wardrobe_settings.h"
 #endif
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
@@ -144,6 +146,11 @@ static lv_image_dsc_t s_image_dsc;  /* its data is set once the image is shown *
 /* The download writes the pixels without the display lock, so a big JPEG isn't
  * held up by each frame; this guards the buffer and what changed in it. */
 static SemaphoreHandle_t s_image_mutex;
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER || CONFIG_MUSE_BOARD_SIMULATOR
+/* Serializes weather producers only. LVGL never waits on flash persistence. */
+static SemaphoreHandle_t s_weather_mutex;
+static StaticSemaphore_t s_weather_mutex_storage;
+#endif
 static uint16_t *s_image_buf;
 static lv_area_t s_image_area;
 static bool s_image_dirty;
@@ -154,6 +161,10 @@ static bool s_ready;
  * the inverse. All navigation state and objects belong to LVGL. */
 static uint16_t *s_card, *s_card_pending;
 static bool s_card_ready;
+static bool s_weather_latest;                 /* protected by s_image_mutex */
+static muse_weather_card_t s_weather_card;
+static bool s_weather_selected, s_weather_visible; /* UI task only */
+static lv_obj_t *s_weather_temp, *s_weather_range, *s_weather_details;
 #define READER_TEXT_MAX 8192
 static char *s_reply_text;
 static char s_reply_id[80];
@@ -283,7 +294,7 @@ static lv_result_t muse_dec_get_area(lv_image_decoder_t *dec, lv_image_decoder_d
     if (!buf) {
         return LV_RESULT_INVALID;
     }
-#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER || CONFIG_MUSE_BOARD_SIMULATOR
     if (!muse_wardrobe_scale((uint16_t *)buf->data, buf->header.stride / sizeof(uint16_t),
                             full->x1, full->x2, y1, y2, (int)s_muse_src.header.w))
 #endif
@@ -979,6 +990,21 @@ static void build_screen(void)
         lv_obj_move_foreground(s_ring);
     }
     if (!CLEAN_HOME) build_button_icons(face);
+    if (CLEAN_HOME) {
+        s_weather_temp = make_label(face, &lv_font_unscii_16, COLOR_LIT);
+        lv_obj_set_style_transform_pivot_x(s_weather_temp, LV_PCT(50), 0);
+        lv_obj_set_style_transform_scale(s_weather_temp, 768, 0);
+        lv_obj_align(s_weather_temp, LV_ALIGN_TOP_MID, 0, 62);
+        s_weather_range = make_label(face, &lv_font_unscii_16, COLOR_LIT);
+        lv_obj_align(s_weather_range, LV_ALIGN_TOP_MID, 0, 118);
+        s_weather_details = make_label(face, &lv_font_unscii_16, COLOR_DIM);
+        lv_obj_align(s_weather_details, LV_ALIGN_TOP_MID, 0, 148);
+        lv_obj_t *labels[] = {s_weather_temp, s_weather_range, s_weather_details};
+        for (unsigned i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+            lv_obj_remove_flag(labels[i], LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_flag(labels[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 
     /* Status line: connectivity icons + power. */
     lv_obj_t *status = lv_obj_create(face);
@@ -1071,10 +1097,9 @@ static void on_cover_event(lv_event_t *e)
     }
 }
 
-/* With the display lock held. */
-static void image_hide_locked(void)
+/* Display lock and s_image_mutex held. */
+static void image_clear_locked(void)
 {
-    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
     if (s_image_buf) {
         lv_obj_add_flag(s_image, LV_OBJ_FLAG_HIDDEN);
         lv_image_set_src(s_image, NULL);
@@ -1083,7 +1108,43 @@ static void image_hide_locked(void)
         s_image_dsc.data = NULL;
         s_image_dirty = false;
     }
+}
+
+static void weather_visible(bool visible)
+{
+    s_weather_visible = visible;
+    if (!s_weather_temp) return;
+    lv_obj_set_flag(s_weather_temp, LV_OBJ_FLAG_HIDDEN, !visible);
+    lv_obj_set_flag(s_weather_range, LV_OBJ_FLAG_HIDDEN, !visible);
+    lv_obj_set_flag(s_weather_details, LV_OBJ_FLAG_HIDDEN, !visible);
+}
+
+/* With the display lock held. */
+static void image_hide_locked(void)
+{
+    s_weather_selected = false;
+    weather_visible(false);
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    image_clear_locked();
     xSemaphoreGive(s_image_mutex);
+}
+
+/* Voice, setup, settings and camera always have priority over forecast text. */
+static bool weather_can_show(void)
+{
+    static char caption[2];
+    static uint32_t version = UINT32_MAX;
+    muse_state_caption(caption, sizeof(caption), &version);
+    bool safe = muse_state_mode(NULL) == MUSE_MODE_IDLE && !caption[0]
+        && !muse_state_asleep() && !s_reading && !s_browsing
+        && !strcmp(s_idle_name, "READY") && muse_link_state() != MUSE_LINK_CONFIRM
+        && (!s_name_lbl || !lv_label_get_text(s_name_lbl)[0])
+        && (!s_pair || lv_obj_has_flag(s_pair, LV_OBJ_FLAG_HIDDEN))
+        && (!s_tv || lv_obj_get_scroll_x(s_tv) == 0);
+#if CONFIG_MUSE_WATCHER_CAMERA
+    safe = safe && watcher_camera_state() == WATCHER_CAMERA_CLOSED;
+#endif
+    return safe;
 }
 
 /* Each frame: shows a new image and redraws what the download changed. */
@@ -1663,6 +1724,10 @@ static void update_status(muse_mode_t mode, float now)
     const answer_layout_t *layout = answer >= 0 ? &s_answers[answer] : NULL;
     int px = layout ? layout->px : s_canvas_px;
     int y = layout ? layout->y : s_big_y;
+    if (s_weather_visible && !layout) {
+        px = MUSE_PX_W * 4;
+        y = s_h / 2 - 24 - (px / 2 - ART_BLANK_ROWS * (px / MUSE_PX_W));
+    }
     if (!CLEAN_HOME && !layout && mode == MUSE_MODE_IDLE && !caption[0]) {
         y += muse_board->idle_avatar_y_offset;
     }
@@ -1704,52 +1769,16 @@ static void update_status(muse_mode_t mode, float now)
     update_power(now);
 }
 
-static volatile bool s_snapshot;
-
-/* Streams the screen over the USB cable as base64 RGB565 (bench testing; needs
- * LV_USE_SNAPSHOT, which devices/sdkconfig.muse-bench turns on). */
-static void send_snapshot(void)
-{
-#if LV_USE_SNAPSHOT
-    lv_draw_buf_t *buf = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
-    if (!buf) {
-        return;
-    }
-    enum { RAW = 144 };   /* lines must fit the driver's 256-byte TX ring */
-    char hdr[48];
-    int n = snprintf(hdr, sizeof(hdr), "\nSNAP BEGIN %d %d %d\n", (int)buf->header.w, (int)buf->header.h, RAW);
-    muse_console_write(hdr, n);
-    static unsigned char b64[4 * RAW / 3 + 4];
-    for (uint32_t y = 0; y < buf->header.h; y++) {
-        const unsigned char *p = buf->data + y * buf->header.stride;
-        size_t left = buf->header.w * 2;
-        while (left) {
-            size_t chunk = left > RAW ? RAW : left, olen;
-            mbedtls_base64_encode(b64, sizeof(b64), &olen, p, chunk);
-            b64[olen++] = '\n';
-            muse_console_write(b64, olen);
-            p += chunk;
-            left -= chunk;
-        }
-    }
-    muse_console_write("SNAP END\n", 9);
-    lv_draw_buf_destroy(buf);
-#else
-    muse_console_write("\nSNAP OFF\n", 10);   /* so snap.py can say why */
-#endif
-}
+static atomic_bool s_snapshot;
 
 void muse_ui_request_snapshot(void)
 {
-    s_snapshot = true;
+    atomic_store(&s_snapshot, true);
 }
 
 static void frame_tick(lv_timer_t *timer)
 {
-    if (s_snapshot) {
-        s_snapshot = false;
-        send_snapshot();
-    }
+    if (atomic_exchange(&s_snapshot, false)) muse_snapshot_start(lv_screen_active());
     (void)timer;
     navigation_tick((float)esp_timer_get_time() / 1e6f);
     image_sync();
@@ -1773,6 +1802,7 @@ static void frame_tick(lv_timer_t *timer)
         return;
     }
     update_chrome(now);
+    weather_visible(s_weather_selected && !s_image_buf && weather_can_show());
     if (CLEAN_HOME && (s_touch.down || s_touch.waiting)) touch_step(0, 0, 0);
     if (muse_menu_tick(now)) {
         image_hide_locked();
@@ -1799,7 +1829,7 @@ static void frame_tick(lv_timer_t *timer)
         .happy = muse_state_happiness(),
     };
     muse_pixel_render(&pose);
-#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER || CONFIG_MUSE_BOARD_SIMULATOR
     bool ambient = mode == MUSE_MODE_IDLE && !s_reading && !s_browsing
                    && s_answer < 0 && !strcmp(s_idle_name, "READY")
                    && lv_obj_has_flag(s_pair, LV_OBJ_FLAG_HIDDEN)
@@ -1849,6 +1879,9 @@ esp_err_t muse_ui_start(void)
         s_dy = 0;
     }
 
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER || CONFIG_MUSE_BOARD_SIMULATOR
+    s_weather_mutex = xSemaphoreCreateMutexStatic(&s_weather_mutex_storage);
+#endif
     lv_display_t *disp = muse_board->display_start(&s_indev);
     if (!disp) {
         ESP_LOGE(TAG, "display init failed");
@@ -1938,9 +1971,26 @@ void muse_ui_reply_update(const char *id, const char *text)
 /* Called only by LVGL, with s_image_mutex held. */
 static bool card_show_locked(void)
 {
+    if (s_weather_latest) {
+        image_clear_locked();
+        const muse_weather_card_t *c = &s_weather_card;
+        char temp[24], high[24] = "", low[24] = "", wind[24] = "", humidity[24] = "";
+        snprintf(temp, sizeof(temp), "%.0f F", (double)c->temp_f);
+        if (c->present & MUSE_WEATHER_HIGH) snprintf(high, sizeof(high), "H %.0f", (double)c->high_f);
+        if (c->present & MUSE_WEATHER_LOW) snprintf(low, sizeof(low), "L %.0f", (double)c->low_f);
+        if (c->present & MUSE_WEATHER_WIND) snprintf(wind, sizeof(wind), "WIND %.0f MPH", (double)c->wind_mph);
+        if (c->present & MUSE_WEATHER_HUMIDITY) snprintf(humidity, sizeof(humidity), "RH %.0f%%", (double)c->humidity_pct);
+        lv_label_set_text(s_weather_temp, temp);
+        lv_label_set_text_fmt(s_weather_range, "%s%s%s", high, high[0] && low[0] ? "   " : "", low);
+        lv_label_set_text_fmt(s_weather_details, "%s%s%s", wind, wind[0] && humidity[0] ? "  " : "", humidity);
+        s_weather_selected = true;
+        return true;
+    }
     if (!s_card) return false;
     if (!s_image_buf) s_image_buf = heap_caps_malloc((size_t)s_w * s_h * 2, MALLOC_CAP_SPIRAM);
     if (!s_image_buf) return false;
+    s_weather_selected = false;
+    weather_visible(false);
     memcpy(s_image_buf, s_card, (size_t)s_w * s_h * 2);
     s_image_area = (lv_area_t){0, 0, s_w - 1, s_h - 1};
     s_image_dirty = true;
@@ -1966,14 +2016,14 @@ static void navigation_tick(float now)
     if (mode == MUSE_MODE_IDLE) s_reply_dismissed = false;
     xSemaphoreTake(s_image_mutex, portMAX_DELAY);
     bool have_reply = s_reply_text && s_reply_text[0];
-    bool have_card = s_card != NULL;
+    bool have_card = s_card != NULL || s_weather_latest;
     static unsigned generation;
     if (generation != s_reply_generation) {
         generation = s_reply_generation;
         s_reader_page = 0;
         s_reply_dismissed = false;
     }
-    if (s_card_ready && !blocked && !camera) {
+    if (s_card_ready && !blocked && !camera && (!s_weather_latest || weather_can_show())) {
         if (card_show_locked()) {
             s_card_ready = false;
             s_reading = s_browsing = false;
@@ -2032,7 +2082,7 @@ static void navigation_tick(float now)
                     s_reading = true;
                     s_reader_page = 0;
                 }
-            } else if (s_reading || s_image_buf) {
+            } else if (s_reading || s_image_buf || s_weather_selected) {
                 s_reply_dismissed = s_reading;
                 image_hide_locked();
                 navigation_close();
@@ -2129,6 +2179,7 @@ void muse_ui_card_finish(bool success)
         heap_caps_free(s_card);
         s_card = s_card_pending;
         s_card_pending = NULL;
+        s_weather_latest = false;
         s_card_ready = true;
         muse_state_set_asleep(false);
     } else {
@@ -2136,6 +2187,31 @@ void muse_ui_card_finish(bool success)
         s_card_pending = NULL;
     }
     xSemaphoreGive(s_image_mutex);
+}
+
+esp_err_t muse_ui_weather_show(const muse_weather_card_t *card)
+{
+#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER || CONFIG_MUSE_BOARD_SIMULATOR
+    if (!card) return ESP_ERR_INVALID_ARG;
+    if (!s_ready) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_weather_mutex, portMAX_DELAY);
+    esp_err_t err = muse_wardrobe_settings_set(card->outfit_id);
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+        s_weather_card = *card;
+        s_weather_latest = true;
+        s_card_ready = true;
+        heap_caps_free(s_card);
+        s_card = NULL;
+        muse_state_set_asleep(false);
+        xSemaphoreGive(s_image_mutex);
+    }
+    xSemaphoreGive(s_weather_mutex);
+    return err;
+#else
+    (void)card;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 bool muse_ui_image_size(int *w, int *h)

@@ -39,6 +39,11 @@ void muse_console_write(const void *buf, size_t n)
     usb_serial_jtag_write_bytes(buf, n, portMAX_DELAY);
 }
 
+bool muse_console_write_timeout(const void *buf, size_t n, unsigned timeout_ms)
+{
+    return usb_serial_jtag_write_bytes(buf, n, pdMS_TO_TICKS(timeout_ms)) == (int)n;
+}
+
 bool muse_console_host(void)
 {
     return usb_serial_jtag_is_connected();
@@ -144,6 +149,12 @@ bool muse_console_getc(uint8_t *c)
 void muse_console_write(const void *buf, size_t n)
 {
     uart_write_bytes(PORT, buf, n);
+}
+
+bool muse_console_write_timeout(const void *buf, size_t n, unsigned timeout_ms)
+{
+    (void)timeout_ms;
+    return uart_write_bytes(PORT, buf, n) == (int)n;
 }
 
 bool muse_console_host(void)

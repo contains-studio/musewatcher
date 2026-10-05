@@ -35,4 +35,5 @@ with tempfile.TemporaryDirectory() as tmp:
     # Compare actual rendered snapshots; don't rely on drawing-call mocks.
     assert (out/'05-saved-card.ppm').read_bytes()==(out/'08-recalled-card.ppm').read_bytes()
     assert (out/'14-cancelled-deferred-card.ppm').read_bytes() != (out/'15-recall-cancelled-card.ppm').read_bytes()
+    assert (out/'19-native-weather.ppm').read_bytes() != (out/'20-native-weather-moving.ppm').read_bytes()
 print('PASS recalled card is pixel-identical after camera use and failed download')

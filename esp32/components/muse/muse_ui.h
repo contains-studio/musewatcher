@@ -21,6 +21,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "muse_weather.h"
 
 /*
  * Bring up the display and build the UI: the avatar on the first tile,
@@ -60,6 +61,9 @@ void muse_ui_reply_update(const char *id, const char *text);
  * the complete download succeeds; failure keeps the last completed card. */
 bool muse_ui_card_draw(int x, int y, int w, int h, const uint16_t *pixels);
 void muse_ui_card_finish(bool success);
+/* Native forecast. Saves the outfit and queues the card for the next safe
+ * idle frame; failure preserves the previous outfit and latest card. */
+esp_err_t muse_ui_weather_show(const muse_weather_card_t *card);
 /* Explicit remote return to Muse cancels deferred presentation, retaining recall. */
 void muse_ui_show_animation(void);
 

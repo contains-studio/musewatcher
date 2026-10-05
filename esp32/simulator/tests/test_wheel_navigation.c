@@ -7,6 +7,24 @@
 #include "muse_wheel_gesture.h"
 #include "muse_input.h"
 #include "muse_voice.h"
+#include "muse_wardrobe.h"
+#include <unistd.h>
+static pthread_mutex_t save_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t save_changed=PTHREAD_COND_INITIALIZER;
+static bool save_blocked, save_entered;
+/* Replace the simulator's weak in-memory persistence with a controllable
+ * store. The real UI must stay responsive while this save is stalled. */
+esp_err_t muse_wardrobe_settings_set(const char *id) {
+    if(!muse_wardrobe_valid(id)) return ESP_ERR_INVALID_ARG;
+    pthread_mutex_lock(&save_lock);
+    save_entered=true;pthread_cond_broadcast(&save_changed);
+    while(save_blocked) pthread_cond_wait(&save_changed,&save_lock);
+    pthread_mutex_unlock(&save_lock);
+    muse_wardrobe_select(id);return ESP_OK;
+}
+static void *deliver_weather(void *card) {
+    assert(muse_ui_weather_show(card)==ESP_OK);return NULL;
+}
 static void step(unsigned ms) {
     for (unsigned t=0;t<ms;t+=5) { sim_time_advance_us(5000); lv_timer_handler(); }
 }
@@ -118,6 +136,78 @@ int main(int argc, char **argv) {
     click();assert(muse_state_mode(NULL)==MUSE_MODE_IDLE);
     puts("PASS delayed navigation cancel cannot target the next turn");
     puts("PASS wheel cancels thinking and manual reading, works with mic off, permits next hold, preserves idle click");
+    /* Native weather fixtures exercise the real UI and outfit renderer. */
+    muse_state_set_caption("%s", "");step(5000);
+    muse_weather_card_t weather = {.temp_f=75, .high_f=80, .low_f=57,
+        .wind_mph=10, .humidity_pct=52, .present=15, .outfit_id="warm-crochet"};
+    assert(muse_ui_weather_show(&weather)==ESP_OK);step(500);
+    expect("75 F");expect("H 80   L 57");expect("WIND 10 MPH  RH 52%");
+    assert(!strcmp(muse_wardrobe_current(),"warm-crochet"));snap("19-native-weather");
+    step(550);snap("20-native-weather-moving");
+    if(getenv("MUSE_WEATHER_VIDEO")) {
+        for(unsigned i=0;i<100;i++) {
+            if(i==30) muse_state_make_happy();
+            char name[40];snprintf(name,sizeof(name),"weather-frame-%03u",i);
+            step(50);snap(name);
+        }
+    }
+    click();assert(!has_text(lv_screen_active(),"75 F"));
+    turn(1);expect("Latest card");click();expect("75 F");
+    card(0x07e0,false);expect("75 F");
+    muse_ui_show_animation();step(200);assert(!has_text(lv_screen_active(),"75 F"));
+    turn(1);click();expect("75 F");
+    muse_input_touch(MUSE_PTT_DOWN);step(200);assert(!has_text(lv_screen_active(),"75 F"));
+    muse_input_touch(MUSE_PTT_UP);step(200);
+    weather.temp_f=-12;weather.present=MUSE_WEATHER_LOW;weather.low_f=-20;
+    strcpy(weather.outfit_id,"freezing-puffer");
+    assert(muse_ui_weather_show(&weather)==ESP_OK);step(200);
+    assert(!has_text(lv_screen_active(),"-12 F"));
+    click();muse_state_set_caption("%s", "");step(400);expect("-12 F");expect("L -20");
+    assert(!has_text(lv_screen_active(),"WIND"));snap("21-native-weather-cold");
+    sim_services_set_camera("live");step(200);
+    weather.temp_f=100;weather.present=0;strcpy(weather.outfit_id,"hot-shorts");
+    assert(muse_ui_weather_show(&weather)==ESP_OK);step(200);
+    assert(!has_text(lv_screen_active(),"100 F"));
+    muse_ui_show_animation();sim_services_set_camera("closed");step(200);
+    assert(!has_text(lv_screen_active(),"100 F"));
+    turn(1);click();expect("100 F");snap("22-native-weather-hot");
+    muse_state_set_caption("A response takes priority");step(200);
+    assert(!has_text(lv_screen_active(),"100 F"));
+    muse_state_set_caption("%s", "");step(200);expect("100 F");
+    card(0x001f,true);assert(!has_text(lv_screen_active(),"100 F"));
+    muse_ui_show_animation();turn(1);click();assert(!has_text(lv_screen_active(),"100 F"));
+    muse_ui_show_animation();
+    lv_obj_t *tiles=NULL;
+    for(uint32_t i=0;i<lv_obj_get_child_count(lv_screen_active());i++) {
+        lv_obj_t *child=lv_obj_get_child(lv_screen_active(),i);
+        if(lv_obj_check_type(child,&lv_tileview_class)) tiles=child;
+    }
+    assert(tiles);lv_tileview_set_tile_by_index(tiles,1,0,LV_ANIM_OFF);step(200);
+    assert(muse_ui_weather_show(&weather)==ESP_OK);step(200);
+    assert(!has_text(lv_screen_active(),"100 F"));
+    lv_tileview_set_tile_by_index(tiles,0,0,LV_ANIM_OFF);step(600);expect("100 F");puts("PASS settings weather deferral");
+    muse_ui_show_animation();sim_services_set_link_state(MUSE_LINK_CONFIRM);step(200);
+    assert(muse_ui_weather_show(&weather)==ESP_OK);step(200);
+    assert(!has_text(lv_screen_active(),"100 F"));
+    sim_services_set_link_state(MUSE_LINK_ONLINE);step(600);expect("100 F");puts("PASS link weather deferral");
+    muse_ui_show_animation();sim_services_set_paired(false);sim_services_set_link_state(MUSE_LINK_UNPAIRED);step(200);
+    assert(muse_ui_weather_show(&weather)==ESP_OK);step(200);
+    assert(!has_text(lv_screen_active(),"100 F"));
+    sim_services_set_paired(true);sim_services_set_link_state(MUSE_LINK_ONLINE);step(600);expect("100 F");puts("PASS link weather deferral");
+    puts("PASS native weather animations, recall, omitted values, camera/voice/caption priority and latest-card replacement");
+    puts("PASS weather waits behind settings, pairing confirmation and initial setup");
+    pthread_mutex_lock(&save_lock);save_blocked=true;save_entered=false;
+    weather.temp_f=65;strcpy(weather.outfit_id,"mild-knit");
+    pthread_t producer;assert(!pthread_create(&producer,NULL,deliver_weather,&weather));
+    while(!save_entered) pthread_cond_wait(&save_changed,&save_lock);
+    pthread_mutex_unlock(&save_lock);
+    alarm(5); /* Fails promptly if a blocked save owns the UI's image mutex. */
+    turn(1);expect("Latest card");
+    alarm(0);
+    pthread_mutex_lock(&save_lock);save_blocked=false;pthread_cond_broadcast(&save_changed);
+    pthread_mutex_unlock(&save_lock);assert(!pthread_join(producer,NULL));
+    click();expect("65 F");assert(!strcmp(muse_wardrobe_current(),"mild-knit"));
+    puts("PASS wheel responds while outfit persistence is stalled; new forecast publishes afterward");
     lv_deinit();
     return 0;
 }

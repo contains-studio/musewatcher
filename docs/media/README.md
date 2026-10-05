@@ -4,7 +4,7 @@ These files show the implemented Watcher UI. No device credentials, private conv
 
 | File | What it shows | Capture limits |
 |---|---|---|
-| `device-idle.png`, `device-excited.png` | Physical Watcher with the earlier hot-weather artwork | Historical USB screenshots from before the artwork regeneration. The excited state was triggered by a serial home-wheel click, which calls the same happiness state as touch. Snapshot transfer pauses drawing. |
+| `device-idle.png`, `device-excited.png` | Physical Watcher with the earlier hot-weather artwork | Historical USB screenshots from before the artwork regeneration. The excited state was triggered by a serial home-wheel click, which calls the same happiness state as touch. That firmware paused drawing during snapshot transfer. |
 | `device-weather-card.png` | A weather card delivered to the physical Watcher | Historical weather values and earlier artwork, not a current forecast or capture of the regenerated art. The image-card display path is unchanged. |
 | `tap-reaction.gif`, `tap-reaction-preview.mp4` | Production wardrobe renderer: idle → excited → idle | Host rendering with a simulated tap and 1.6-second happiness timer. The HOST PREVIEW label is an evidence label, not device UI. |
 | `ambient-weather.gif` | Moving scenery around the hot-weather outfit | Current production renderer and regenerated artwork, with simulated time. |
@@ -19,8 +19,10 @@ These files show the implemented Watcher UI. No device credentials, private conv
 
 The main README uses the current previews and cancellation screenshots. The
 older `device-idle.png`, `device-excited.png`, and `device-weather-card.png`
-remain historical evidence and do not show the latest artwork. USB screenshot
-transfer pauses drawing and wheel handling for about 40 seconds; finish the
-capture before testing controls. See [cancellation capture details](wheel-cancel/README.md).
+remain historical evidence and do not show the latest artwork. Those captures
+predate background screenshot transfer: their firmware paused drawing and wheel
+handling for about 40 seconds. Current firmware transfers one frozen snapshot
+in the background while the UI continues; a screenshot alone cannot show that
+interaction. See [cancellation capture details](wheel-cancel/README.md).
 
 The artwork remains subject to the [asset notice](../../assets/weather/NOTICE.md). Videos and GIFs are demonstrations; they do not promise a particular frame rate on every device.

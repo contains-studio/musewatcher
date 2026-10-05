@@ -27,6 +27,9 @@
 #include "muse_settings_ui.h"
 #include "muse_state.h"
 #include "muse_ui.h"
+#include "muse_snapshot.h"
+#include "muse_wardrobe.h"
+#include "muse_wardrobe_settings.h"
 #include "muse_voice.h"
 #include "boards/watcher_camera.h"
 
@@ -327,4 +330,15 @@ void muse_console_write(const void *buf, size_t n)
         (void)fwrite(buf, 1, n, stdout);
         (void)fflush(stdout);
     }
+}
+
+/* The simulator captures its framebuffer directly; USB transport is exercised
+ * by the production snapshot worker's host test and on connected hardware. */
+void muse_snapshot_start(lv_obj_t *screen) { (void)screen; }
+/* Integration tests can replace this in-memory save with a stalled store. */
+__attribute__((weak)) esp_err_t muse_wardrobe_settings_set(const char *id)
+{
+    if (!muse_wardrobe_valid(id)) return ESP_ERR_INVALID_ARG;
+    muse_wardrobe_select(id);
+    return ESP_OK;
 }

@@ -1316,14 +1316,43 @@ static char *build_register_json(void) {
 #endif
 
 #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
-    cJSON *outfit_optional = cJSON_CreateObject();
-    cJSON_AddItemToObject(outfit_optional, "outfit_id", string_param(
+    const char *outfit_description =
         "Outfit ID: default, mild-knit, warm-crochet, cool-suede, cold-layers, "
         "wind-shell, rain-shell, heatwave-linen, freezing-puffer, cold-rain-parka, "
-        "fog-overshirt, warm-rain-shell, hot-wind-stripes, or hot-shorts."));
+        "fog-overshirt, warm-rain-shell, hot-wind-stripes, or hot-shorts.";
+    cJSON *weather_required = cJSON_CreateObject();
+    cJSON_AddItemToObject(weather_required, "outfit_id", string_param(outfit_description));
+    cJSON *weather_optional = cJSON_CreateObject();
+    const struct {
+        const char *key, *description;
+        double min, max;
+    } weather_fields[] = {
+        {"temp_f", "Current temperature, degrees Fahrenheit.", -238, 302},
+        {"high_f", "Daily high, degrees Fahrenheit; at least low_f.", -238, 302},
+        {"low_f", "Daily low, degrees Fahrenheit.", -238, 302},
+        {"wind_mph", "Wind speed, miles per hour.", 0, 400},
+        {"humidity_pct", "Relative humidity, percent.", 0, 100},
+    };
+    for (unsigned i = 0; i < sizeof(weather_fields) / sizeof(weather_fields[0]); i++) {
+        cJSON *field = cJSON_CreateObject();
+        cJSON_AddStringToObject(field, "type", "number");
+        cJSON_AddStringToObject(field, "description", weather_fields[i].description);
+        cJSON_AddNumberToObject(field, "minimum", weather_fields[i].min);
+        cJSON_AddNumberToObject(field, "maximum", weather_fields[i].max);
+        cJSON_AddItemToObject(i == 0 ? weather_required : weather_optional,
+                              weather_fields[i].key, field);
+    }
+    add_command(commands, "display.weather",
+                "Show a native weather card above animated Muse and save its outfit. "
+                "Prefer this low-memory command for weather: no image URL or upload. "
+                "Omit unavailable readings. Accepted cards wait until the Watcher is idle; "
+                "the wheel recalls the latest card. display.show_animation dismisses it.",
+                weather_required, weather_optional);
+    cJSON *outfit_optional = cJSON_CreateObject();
+    cJSON_AddItemToObject(outfit_optional, "outfit_id", string_param(outfit_description));
     add_command(commands, "display.set_outfit",
                 "Choose the Watcher's idle outfit, kept across restarts. "
-                "The selection appears when the current image or weather card is dismissed. "
+                "Native weather cards use the current outfit immediately; an image must be dismissed first. "
                 "Omit outfit_id to query the current selection; default restores the original character.",
                 nullptr, outfit_optional);
 #endif

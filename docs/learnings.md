@@ -82,17 +82,33 @@ The Watcher uses 416 × 416 live-preview frames and requests 640 × 480 stills f
 
 UI callbacks enqueue work instead of waiting for capture, JPEG decoding, shutdown, or upload. Preserve generation checks when closing and reopening the camera so an old completion cannot update a new view. A send failure retains the reviewed image and offers a deliberate retry. Do not automatically retry a possibly accepted upload.
 
-The latest downloaded card is retained separately from the camera preview. Temporary camera frames and failed downloads must not replace the last successfully displayed card. Both saved card and reply history are in RAM and disappear at restart.
+The latest card is retained separately from the camera preview. It can be a downloaded image or a native weather card. Temporary camera frames and failed downloads must not replace the last successful card. Both saved card and reply history are in RAM and disappear at restart.
 
 `camera.capture` returns `payload.format: "jpeg-base64"` and `payload.data_base64` through Home Link. It is only advertised in camera-enabled builds. `display.set_outfit` persists a supported outfit ID in the `muse_wardrobe` NVS namespace and does not dismiss the current card. These are authenticated device-session commands, not unauthenticated web routes.
 
 ## Weather automation lives outside firmware
 
-The bundled selector maps caller-supplied weather to an outfit using `assets/weather/weather-rules.json`. It does not fetch weather or own a recurring job. Users supply their own location, weather source, device selection, schedule, and upload policy.
+The bundled selector maps caller-supplied weather to an outfit using `assets/weather/weather-rules.json`. It does not fetch weather or own a recurring job. Users supply their own location, weather source, device selection, and schedule. The image-delivery fallback also needs their storage/upload policy.
 
 Use current conditions and feels-like temperature when available; do not infer an outfit from the day's high or calendar season. Match the same outfit in the weather card and the saved idle selection. Record provenance outside the display and label missing-data fallbacks.
 
 A remote timeout leaves delivery uncertain. A card can already be visible even if the caller did not receive the response. Confirm the display or inspect another reliable receipt before resending. Keep USB power available for scheduled delivery because battery sleep can suspend network access.
+
+## Send weather values instead of downloading a full-screen image
+
+A weather report contains a handful of numbers and an outfit ID. Sending those as `display.weather` avoids the image upload, HTTPS connection, JPEG decode, and full-screen card buffers required by `display.draw_url`. The firmware renders pixel text over the existing animated wardrobe. The command validates every field before persisting the outfit and queuing the card; invalid data must not partly change either the card or the saved outfit.
+
+The forecast shares **Latest card** with downloaded images. A successful replacement becomes the latest card, while a failed image download preserves the previous one. Card history stays in RAM; outfit selection stays in NVS. Camera, recording, replies, settings, and pairing take priority over weather presentation. `display.show_animation` dismisses the card without deleting recall. These distinctions matter when testing delivery during another workflow, rather than only at idle.
+
+The native command uses Fahrenheit/mph and omits unknown optional measurements. Weather selection still belongs to the caller, including feels-like precedence and precipitation rules. Retain the JPEG route for custom images and firmware that does not advertise `display.weather`; a command timeout does not justify switching routes and duplicating delivery.
+
+## Keep slow snapshot transfer outside the UI task
+
+The panel's RGB565 snapshot is about 332 KiB before base64 encoding, and the Watcher's 115200-baud console needs roughly 40 seconds to transfer it. Writing the whole stream inside the LVGL frame callback stalled drawing and wheel handling for that duration, which made cancellation appear broken during capture.
+
+Capture under the display lock, copy the pixels while accounting for row stride, and release LVGL's draw buffer before returning to the UI. A background task owns the immutable copy and writes small chunks, freeing its buffer on success or failure. Admit only one active transfer so repeated requests cannot accumulate screen-sized allocations. Use bounded USB writes when the host can disappear. The worker must not access LVGL objects or hold the display lock while transmitting.
+
+A snapshot records the capture instant even though the character keeps moving afterward. It cannot demonstrate that controls remained responsive throughout transfer; check the interaction separately and label any local or simulated input. Older evidence captured before this change retains its original pause limitation.
 
 ## Name the kind of evidence that was captured
 

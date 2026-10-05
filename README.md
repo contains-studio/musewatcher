@@ -16,8 +16,9 @@ A community fork of [Meta's Muse Gadget SDK](https://github.com/facebookincubato
 - **A clean home:** Muse sits low on the screen, with sparse pixel weather effects. Settings live on the second screen.
 - **Voice messages:** hold the home screen or wheel to record; release to send. Text replies appear above Muse and page automatically, including when sound is off.
 - **Photos with a preview:** double-tap to open the camera, take a photo, then choose Send, Retake, or Cancel. Opening the camera does not send anything.
-- **A useful wheel:** page through replies, recall the latest image card, and select camera actions.
+- **A useful wheel:** page through replies, recall the latest weather or image card, and select camera actions.
 - **Cancel thinking:** quickly press and release the wheel once to stop the current upload or response wait and return to Muse.
+- **Native weather cards:** forecast values at the top, with Muse still animating below. A single `display.weather` command sends the forecast and outfit without an image upload or HTTPS download.
 - **Weather outfits:** thirteen looks selected by current conditions and feels-like temperature. The saved outfit stays on Muse after the card closes and across restarts.
 - **A real tap reaction:** every outfit has happy eyes, a grin, raised arms, hops, and hearts, then returns to idle after about 1.6 seconds. Fur and clothing stay intact.
 - **A gentler desk companion:** the harsh RGB indicator is switched off at startup. Microphone and speaker switches are in Settings → Sound.
@@ -80,6 +81,10 @@ While thinking, the screen shows **Press wheel to cancel**. Click and release; *
 
 ## Weather images and animations
 
+<p align="center"><img src="docs/media/native-weather/simulator-weather.gif" width="300" alt="Native pixel forecast above an animated Muse wearing the warm-weather crochet outfit"></p>
+
+*Native weather card in the production UI simulator, with fixture forecast values. Muse keeps moving and reacts to a simulated pet at 1.5 seconds. [Video and capture details](docs/media/native-weather/README.md).*
+
 All thirteen outfits use the regenerated artwork with clean faces and cream fur. Each has an idle pose and an excited tap reaction:
 
 <p align="center"><a href="docs/media/outfit-reactions.png"><img src="docs/media/outfit-reactions.png" width="768" alt="All thirteen weather outfits, each shown idle and excited, from warm-weather shorts to rain shells and winter layers"></a></p>
@@ -103,7 +108,9 @@ All **13 original PNGs**, the selection rules, generated RGB565 sprites, and ani
 
 Rain, snow, and ice take precedence over dry-weather outfits. Known dry weather at **24°C / 75.2°F or warmer** uses shorts and sandals with the character's cream fur intact. Feels-like temperature takes priority over current temperature; missing values are omitted. See the complete [ordered weather rules](assets/weather/weather-rules.json).
 
-Render a card locally, without fetching weather or contacting a device:
+Current firmware draws weather cards directly from forecast values, keeping Muse animated below them. The [weather-display skill](skills/muse-weather-display/SKILL.md) selects the matching outfit and sends `display.weather`.
+
+For a standalone image or older firmware, render a card locally without fetching weather or contacting a device:
 
 ```sh
 # Run from the repository root, in a Python environment with Pillow.
@@ -123,17 +130,17 @@ The project permits reuse of its own weather additions under Apache 2.0 to the e
 
 Give Muse the [weather-display skill](skills/muse-weather-display/SKILL.md) and access to this checkout's tools and assets. Configure **your location, command device ID, and IANA time zone**. The command ID can differ from the friendly device name in the app; discover it instead of copying an example.
 
-The workflow fetches fresh weather, selects an outfit, renders and uploads a card, then sends these commands to that device:
+The workflow fetches fresh weather, selects an outfit, and sends one native command to that device. This example uses **synthetic values**; each delivery must use the current forecast:
 
 ```text
-display.set_outfit {"outfit_id":"<selected outfit ID>"}
-display.show_animation {}
-display.draw_url {"url":"<uploaded JPEG URL>"}
+display.weather {"temp_f":79,"outfit_id":"hot-shorts","high_f":83,"low_f":61,"wind_mph":7,"humidity_pct":52}
 ```
 
-Run one manual delivery and inspect the Watcher before scheduling **07:00 in your time zone**. Reuse a matching existing job, approve the required upload through Muse, and verify the stored schedule. Keep the Watcher powered and connected; battery sleep can interrupt delivery. A local render or a command timeout does not prove that the card reached the screen.
+Current temperature and outfit ID are required; omit unknown high/low, wind, or humidity. Native cards use Fahrenheit/mph, validate the complete payload, and save the outfit before presenting the forecast. They keep Muse animated, need no storage upload, and can be recalled with **Latest card**. Dates, locations, source lines, and condition labels stay off the display.
 
-This repo supplies the firmware, artwork, renderer, and skill. Your Muse environment supplies weather access, storage/upload permissions, and scheduling. Cloning the repo does not create a daily job.
+Run one manual delivery and inspect the Watcher before scheduling **07:00 in your time zone**. Reuse a matching existing job and verify the stored schedule. If the device does not advertise `display.weather`, the skill supports the older JPEG upload and `display.draw_url` workflow; that path needs the applicable storage permissions. Keep the Watcher powered and connected; battery sleep can interrupt delivery. A local render or a command timeout does not prove that the card reached the screen.
+
+This repo supplies the firmware, artwork, renderer, and skill. Your Muse environment supplies weather access and scheduling, plus storage/upload permissions for older firmware or custom images. Cloning the repo does not create a daily job.
 
 ## Development and lessons learned
 
@@ -149,7 +156,7 @@ python -m unittest discover -s skills/muse-weather-display/scripts -p 'test_*.py
 python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-The [UI simulator](esp32/simulator/) exercises touch and wheel flows. The [wardrobe preview tool](esp32/tools/muse/wardrobe_preview.py) compiles the production renderer and exports GIFs with `--reaction`. A USB capture uses `python tools/watcher.py screenshot --port PORT --output /tmp/watcher.png` from `esp32/`; transfer pauses drawing and wheel handling for about **40 seconds**. Let it finish before testing controls.
+The [UI simulator](esp32/simulator/) exercises touch and wheel flows. The [wardrobe preview tool](esp32/tools/muse/wardrobe_preview.py) compiles the production renderer and exports GIFs with `--reaction`. A USB capture uses `python tools/watcher.py screenshot --port PORT --output /tmp/watcher.png` from `esp32/`. It captures one instant, then transfers it in the background for about **40 seconds** at 115200 baud. Animation and controls continue during transfer. Only one capture runs at a time; wait for it to finish before requesting another. A snapshot is not a video.
 
 The default branch is **`watcher`**, built from the hardware-tested upstream revision [`b9008ab`](https://github.com/facebookincubator/muse-gadget-sdk/commit/b9008abba7dc4109c66212b9b82e459d08b98b85). The fork retains upstream history and its `main` branch. Other SDK targets remain available, but hardware checks here focus on the Watcher. See [changes in this fork](CHANGES.md) and the [original SDK overview](docs/upstream-sdk.md).
 

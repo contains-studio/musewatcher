@@ -6,7 +6,9 @@ Based on `facebookincubator/muse-gadget-sdk` revision `b9008abba7dc4109c66212b9b
 - Added camera preview, frozen-frame review, explicit send/retake/cancel, and reliable camera frame handling.
 - Added microphone/speaker settings and coordinated recording cancellation across input sources.
 - Added a short wheel press to cancel an active thinking wait without starting a recording or retrying the cancelled note.
-- Preserved the latest completed reply and image card while the device remains running.
+- Preserved the latest completed reply and weather/image card while the device remains running.
+- Added native `display.weather` cards with forecast values above a live animated outfit, without image uploads or HTTPS downloads.
+- Moved USB screenshot transfer to a background task so animation, taps, and wheel controls continue during capture.
 - Added thirteen weather outfits, persistent outfit selection, weather scenery, and an excited tap pose for each outfit.
 - Added default-avatar ambient scenes and a configurable device time zone.
 - Switched off the Watcher's persistent RGB indicator during startup.

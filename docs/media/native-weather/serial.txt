@@ -1,0 +1,20 @@
+Final firmware device checks — 2026-10-05
+Physical console: Seeed SenseCAP Watcher; chat available.
+Final paced flash: 4/4 region hashes verified; pairing retained.
+
+Background capture fixture:
+  0.00 s: request snapshot of local thinking state
+  1.07 s: inject wheel click + second snapshot request
+  40.29 s: original snapshot complete
+  following 2 s: no queued second capture
+  subsequent framebuffer: idle, as shown in device-capture-after-cancel.png
+  heartbeat during capture: internal 19 KiB free / 12 KiB largest; PSRAM 3,249 KiB free
+
+Native weather fixture:
+  Muse reports first display.weather success
+  Muse reports second display.weather success
+  subsequent framebuffer: expected values above crochet outfit
+  repeated post-delivery samples: internal 19 KiB free / 12 KiB largest; PSRAM 3,589 KiB free
+
+Filtered test observations only. Forecast values and thinking state are synthetic.
+No live-network cancellation or long-running memory stress claim is made.

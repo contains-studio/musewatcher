@@ -232,7 +232,7 @@ this pauses automatic paging. Press the wheel to finish reading.
 
 While Muse is idle, turn the wheel to browse **Latest card**, **Last reply**,
 and **Back to Muse**, then press to open the selected item. Only available
-items appear. The latest completed image card and last reply stay in memory
+items appear. The latest completed weather or image card and last reply stay in memory
 until restart; camera frames and failed image downloads do not replace the
 saved card. The browse hint disappears after ten seconds. A turn on a sleeping
 screen wakes it. Rotation no longer controls phone setup or power.

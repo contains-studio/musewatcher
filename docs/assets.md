@@ -70,7 +70,13 @@ scheduling. The local selector alone neither uploads a card nor creates a job.
 
 ## Render a weather card
 
-Install Pillow in a local environment for rendering and asset conversion:
+Current Watcher firmware accepts forecast values and an outfit ID through
+`display.weather`, then renders the numbers above the live animated character.
+Use that path for routine deliveries; the [weather skill](../skills/muse-weather-display/SKILL.md)
+describes its fields. It does not need Pillow, a JPEG, an upload, or a download.
+
+The local image renderer remains useful for previews, sharing a standalone
+card, and delivery to older firmware. Install Pillow in a local environment for rendering and asset conversion:
 
 ```sh
 python3 -m venv .venv
@@ -130,9 +136,9 @@ excited states. Preserve the source artwork and edit the generator inputs;
 hand-editing the generated pixel array makes the next build harder to reproduce.
 
 The firmware's ambient weather effects follow the selected outfit. They do not
-fetch weather themselves. A weather delivery selects the outfit with
-`display.set_outfit`; the saved choice persists when a card is dismissed and
-across device restarts. Rebuild and flash firmware after changing sprite pixels
+fetch weather themselves. A native weather delivery includes the outfit in
+`display.weather`; older image delivery uses `display.set_outfit`. The saved
+choice persists when a card is dismissed and across device restarts. Rebuild and flash firmware after changing sprite pixels
 or animation code.
 
 Run the portable selection scenarios after editing the rules or catalog:

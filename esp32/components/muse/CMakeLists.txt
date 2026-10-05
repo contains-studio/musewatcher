@@ -27,6 +27,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_app.c"
         "muse_board.c"
         "muse_console.c"
+        "muse_snapshot.c"
         "muse_state.c"
         "muse_battery.c"
         "muse_ui.c"

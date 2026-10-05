@@ -3,8 +3,10 @@
 `device-thinking.png` and `device-cancelled.png` are screenshots from the
 flashed SenseCAP Watcher, before and after cancellation. The thinking state
 and wheel click were injected over USB; this was not a live Muse request or
-a physical button test. USB screenshot transfer pauses the UI and wheel
-handling for about 40 seconds, so do not capture while testing the button.
+a physical button test. The firmware used for these captures paused the UI and
+wheel handling during the roughly 40-second USB transfer. Current firmware
+transfers snapshots in the background; these older images do not demonstrate
+that change.
 
 The simulator captures below use the production LVGL UI at the
 Watcher's 412 × 412 resolution. The waiting state, reply text, voice service,
