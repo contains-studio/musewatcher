@@ -28,6 +28,7 @@
 
 #include "app.h"
 #include "config_store.h"
+#include "voice_board.h"
 #include "wifi_mgr.h"
 
 #include "muse_link.h"
@@ -89,6 +90,15 @@ size_t muse_settings_hatch_token_len(void) {
 // No screen to show replies on: anything played goes to the speaker.
 bool muse_settings_speaker_on(void) {
     return true;
+}
+
+bool muse_settings_mic_on(void) {
+    return !voice_board_muted();
+}
+
+// Voice PE has no software mic toggle; its hardware mute is checked live above.
+uint32_t muse_settings_mic_generation(void) {
+    return 0;
 }
 
 // No screen either, so reply text is never shown; Muse's default page.
