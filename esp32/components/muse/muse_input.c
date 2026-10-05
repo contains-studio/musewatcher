@@ -317,7 +317,9 @@ static void talk_button(unsigned ev)
 #if CONFIG_MUSE_WATCHER_CAMERA
     static muse_wheel_gesture_t wheel;
     static bool bypass_until_release;
-    bool camera = watcher_camera_state() != WATCHER_CAMERA_CLOSED;
+    static uint32_t pressed_turn, waiting_turn;
+    int camera_state = watcher_camera_state();
+    bool camera = camera_state != WATCHER_CAMERA_CLOSED;
     bool special = !camera && (muse_state_asleep() || muse_menu_is_open()
                                || muse_link_state() == MUSE_LINK_CONFIRM);
     if (special || (bypass_until_release && !camera)) {
@@ -325,6 +327,7 @@ static void talk_button(unsigned ev)
          * physical press on the same path even after its action changes mode. */
         bool held = wheel.down || talk_down || bypass_until_release;
         wheel = (muse_wheel_gesture_t){0};
+        pressed_turn = waiting_turn = 0;
         if (ev & MUSE_BTN_TALK_PRESS) held = true;
         if (ev & MUSE_BTN_TALK_RELEASE) held = false;
         bypass_until_release = held;
@@ -334,13 +337,21 @@ static void talk_button(unsigned ev)
         unsigned edges = ((ev & MUSE_BTN_TALK_PRESS) ? MUSE_WHEEL_DOWN : 0)
                          | ((ev & MUSE_BTN_TALK_RELEASE) ? MUSE_WHEEL_UP : 0)
                          | ((ev & (MUSE_BTN_WHEEL_PREV | MUSE_BTN_WHEEL_NEXT)) ? MUSE_WHEEL_TURN : 0);
+        /* Preserve the target through double-click recognition and the UI
+         * queue. A response can finish and another saved note start meanwhile. */
+        uint32_t tap_turn = waiting_turn;
+        if (edges & MUSE_WHEEL_DOWN) {
+            pressed_turn = !camera || camera_state == WATCHER_CAMERA_SENDING
+                ? muse_voice_thinking_turn() : 0;
+        }
         unsigned action = muse_wheel_step(&wheel, edges,
                                            (uint32_t)(esp_timer_get_time() / 1000), camera);
+        if (wheel.waiting) waiting_turn = pressed_turn;
         if (action & MUSE_WHEEL_CAMERA) {
             ESP_LOGI(TAG, "wheel double-click: camera preview/shutter");
             watcher_camera_preview_toggle();
         }
-        if (action & MUSE_WHEEL_TAP) muse_ui_wheel_click();
+        if (action & MUSE_WHEEL_TAP) muse_ui_wheel_click(tap_turn);
         ev = ((action & MUSE_WHEEL_DOWN) ? MUSE_BTN_TALK_PRESS : 0)
              | ((action & MUSE_WHEEL_UP) ? MUSE_BTN_TALK_RELEASE : 0);
         if (camera && talk_down) ev |= MUSE_BTN_TALK_RELEASE;
@@ -836,7 +847,11 @@ static bool console_command(char *line, bool whole)
     if (whole && !strncmp(line, "wheel=", 6)) {
         if (!strcmp(line + 6, "next")) muse_ui_wheel_turn(1);
         else if (!strcmp(line + 6, "prev")) muse_ui_wheel_turn(-1);
-        else if (!strcmp(line + 6, "click")) muse_ui_wheel_click();
+        else if (!strcmp(line + 6, "click")) {
+            int camera = watcher_camera_state();
+            muse_ui_wheel_click(camera == WATCHER_CAMERA_CLOSED || camera == WATCHER_CAMERA_SENDING
+                ? muse_voice_thinking_turn() : 0);
+        }
         else return false;
         return true;
     }

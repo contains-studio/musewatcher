@@ -44,6 +44,7 @@
 #include "muse_settings.h"
 #include "muse_settings_ui.h"
 #include "muse_state.h"
+#include "muse_voice.h"
 #include "muse_wifi.h"
 #include "muse_touch_gesture.h"
 #include "muse_text.h"
@@ -157,6 +158,7 @@ static bool s_card_ready;
 static char *s_reply_text;
 static char s_reply_id[80];
 static unsigned s_reply_generation;
+typedef struct { int key; uint32_t cancel_turn; } navigation_event_t;
 static QueueHandle_t s_navigation;
 static lv_obj_t *s_nav_title, *s_nav_hint;
 static bool s_reading, s_browsing;
@@ -1634,7 +1636,8 @@ static void update_status(muse_mode_t mode, float now)
         if (s_reader_page >= pages) s_reader_page = pages > 0 ? pages - 1 : 0;
         xSemaphoreGive(s_image_mutex);
         char hint[80];
-        snprintf(hint, sizeof(hint), "Page %d/%d   Press wheel: done", s_reader_page + 1, pages);
+        snprintf(hint, sizeof(hint), "Page %d/%d   Press wheel: %s", s_reader_page + 1, pages,
+                 mode == MUSE_MODE_THINKING ? "cancel" : "done");
         label_text(s_nav_hint, hint);
         fresh = true;
     } else if (CLEAN_HOME && (s_browsing || s_reply_dismissed)) {
@@ -1853,7 +1856,7 @@ esp_err_t muse_ui_start(void)
     }
 
     s_image_mutex = xSemaphoreCreateMutex();
-    if (CLEAN_HOME) s_navigation = xQueueCreate(32, sizeof(int));
+    if (CLEAN_HOME) s_navigation = xQueueCreate(32, sizeof(navigation_event_t));
     muse_board->display_lock(-1);
     build_screen();
     if (s_settings) {
@@ -1906,14 +1909,14 @@ static void navigation_close(void)
 
 void muse_ui_wheel_turn(int direction)
 {
-    int key = direction < 0 ? -1 : 1;
-    if (s_ready && s_navigation) xQueueSend(s_navigation, &key, 0);
+    navigation_event_t event = {.key = direction < 0 ? -1 : 1};
+    if (s_ready && s_navigation) xQueueSend(s_navigation, &event, 0);
 }
 
-void muse_ui_wheel_click(void)
+void muse_ui_wheel_click(uint32_t cancel_turn)
 {
-    int key = 0;
-    if (s_ready && s_navigation) xQueueSend(s_navigation, &key, 0);
+    navigation_event_t event = {.cancel_turn = cancel_turn};
+    if (s_ready && s_navigation) xQueueSend(s_navigation, &event, 0);
 }
 
 void muse_ui_reply_update(const char *id, const char *text)
@@ -1977,10 +1980,27 @@ static void navigation_tick(float now)
         }
     }
     xSemaphoreGive(s_image_mutex);
-    int key;
-    while (s_navigation && xQueueReceive(s_navigation, &key, 0) == pdTRUE) {
+    bool can_cancel = !camera;
+#if CONFIG_MUSE_WATCHER_CAMERA
+    can_cancel |= camera == WATCHER_CAMERA_SENDING;
+#endif
+    navigation_event_t event;
+    while (s_navigation && xQueueReceive(s_navigation, &event, 0) == pdTRUE) {
+        int key = event.key;
         if (blocked) continue;
         muse_state_poke();
+        if (!key && event.cancel_turn) {
+            if (can_cancel && muse_voice_cancel_thinking(event.cancel_turn)) {
+#if CONFIG_MUSE_WATCHER_CAMERA
+                if (camera == WATCHER_CAMERA_SENDING) watcher_camera_close();
+#endif
+                image_hide_locked();
+                navigation_close();
+            }
+            /* A stale cancel is consumed, never applied to another response
+             * or repurposed as a camera confirmation. */
+            break;
+        }
 #if CONFIG_MUSE_WATCHER_CAMERA
         if (camera) {
             bool review = camera == WATCHER_CAMERA_REVIEW;
@@ -2069,13 +2089,19 @@ static void navigation_tick(float now)
 #endif
     lv_obj_align(s_nav_hint, LV_ALIGN_TOP_MID, 0, s_browsing ? 126 : 194);
     if (s_browsing && now >= s_browse_until) navigation_close();
-    lv_obj_set_style_bg_opa(s_nav_hint, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_text_color(s_nav_hint, lv_color_hex(COLOR_DIM), 0);
+    bool thinking = !blocked && can_cancel && muse_state_mode(NULL) == MUSE_MODE_THINKING;
+    bool over_image = thinking && s_image_buf;
+    lv_obj_set_style_bg_color(s_nav_hint, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_nav_hint, over_image ? LV_OPA_80 : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_color(s_nav_hint, lv_color_hex(over_image ? COLOR_LIT : COLOR_DIM), 0);
+    if (over_image) lv_obj_move_foreground(s_nav_hint);
     lv_obj_set_flag(s_nav_title, LV_OBJ_FLAG_HIDDEN, !s_browsing);
-    lv_obj_set_flag(s_nav_hint, LV_OBJ_FLAG_HIDDEN, !s_browsing && !s_reading);
+    lv_obj_set_flag(s_nav_hint, LV_OBJ_FLAG_HIDDEN, !s_browsing && !s_reading && !thinking);
     if (s_browsing) {
         label_text(s_nav_title, s_browse_item == NAV_CARD ? "Latest card" : s_browse_item == NAV_REPLY ? "Last reply" : "Back to Muse");
-        label_text(s_nav_hint, "Turn wheel to browse\nPress wheel to open");
+        label_text(s_nav_hint, thinking ? "Turn wheel to browse\nPress wheel to cancel" : "Turn wheel to browse\nPress wheel to open");
+    } else if (thinking && !s_reading) {
+        label_text(s_nav_hint, "Press wheel to cancel");
     }
 }
 

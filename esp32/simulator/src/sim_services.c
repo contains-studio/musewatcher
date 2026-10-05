@@ -27,6 +27,7 @@
 #include "muse_settings_ui.h"
 #include "muse_state.h"
 #include "muse_ui.h"
+#include "muse_voice.h"
 #include "boards/watcher_camera.h"
 
 #define SIM_DEFAULT_NAME "MuseGadget-SIM001"
@@ -52,6 +53,7 @@ static bool s_speaker = true;
 static bool s_mic = true;
 static watcher_camera_state_t s_camera = WATCHER_CAMERA_CLOSED;
 static char s_camera_error[96];
+static uint32_t s_voice_generation = 1;
 
 /* Simulated voice feedback for the production UI's real touch gestures.
  * No microphone capture or network submission occurs in the simulator. */
@@ -60,12 +62,29 @@ void muse_input_touch(muse_ptt_t type)
     bool down = type == MUSE_PTT_DOWN, cancel = type == MUSE_PTT_CANCEL;
     fprintf(stderr, "touch PTT %s\n", down ? "down" : cancel ? "cancel" : "up");
     if (down) {
+        s_voice_generation++;
         muse_state_set_mode(s_mic ? MUSE_MODE_LISTENING : MUSE_MODE_IDLE);
         muse_state_set_caption(s_mic ? "LISTENING..." : "MIC OFF");
     } else if (muse_state_mode(NULL) == MUSE_MODE_LISTENING) {
         muse_state_set_mode(cancel ? MUSE_MODE_IDLE : MUSE_MODE_THINKING);
         muse_state_set_caption(cancel ? "CANCELLED" : "");
     }
+}
+
+/* Simulated voice-task completion; host voice tests exercise stream teardown. */
+uint32_t muse_voice_thinking_turn(void)
+{
+    return muse_state_mode(NULL) == MUSE_MODE_THINKING ? s_voice_generation : 0;
+}
+
+bool muse_voice_cancel_thinking(uint32_t generation)
+{
+    if (!generation || generation != muse_voice_thinking_turn()) return false;
+    muse_state_set_level(0);
+    muse_state_set_progress(0);
+    muse_state_set_caption("%s", "");
+    muse_state_set_mode(MUSE_MODE_IDLE);
+    return true;
 }
 
 static void copy_text(char *out, size_t cap, const char *text)
@@ -106,6 +125,7 @@ void sim_services_reset(void)
     s_mic = true;
     s_camera = WATCHER_CAMERA_CLOSED;
     s_camera_error[0] = '\0';
+    s_voice_generation = 1;
 }
 
 void sim_services_set_wifi(muse_wifi_state_t state, const char *ssid)

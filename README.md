@@ -58,6 +58,7 @@ The profile enables the camera and USB screenshots, and includes the required sp
 | Home | Hold the screen or wheel | Record; release to send a voice message |
 | Home | Double-tap / double-click the wheel | Open camera preview |
 | Home | Turn the wheel | Browse Latest card, Last reply, and Back to Muse |
+| Thinking | Press the wheel once | Cancel the active wait and return to Muse |
 | Reply | Turn the wheel | Read backward/forward and pause automatic paging |
 | Reply/card | Press the wheel | Return to Muse |
 | Camera | Take photo, then Send / Retake / Cancel | Review the exact frame before sending |
@@ -66,6 +67,8 @@ The profile enables the camera and USB screenshots, and includes the required sp
 | Sleeping | Touch or turn the wheel | Wake; the first gesture is consumed |
 
 Dragging away cancels a touch recording. Muting the microphone cancels an active recording and prevents new ones. Photos and voice notes are separate messages.
+
+While thinking, the screen shows **Press wheel to cancel**. A short press stops the current upload or response wait on the Watcher without recording another message or retrying the cancelled note. Muse may still finish a request it already received in the app. Camera preview and review keep their displayed wheel actions.
 
 ## Weather images and animations
 

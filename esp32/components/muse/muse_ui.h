@@ -53,7 +53,8 @@ void muse_ui_camera_hint(bool visible);
 
 /* Watcher navigation. Queued to LVGL; safe from the input/session tasks. */
 void muse_ui_wheel_turn(int direction);
-void muse_ui_wheel_click(void);
+/* cancel_turn is captured at physical press; zero means ordinary navigation. */
+void muse_ui_wheel_click(uint32_t cancel_turn);
 void muse_ui_reply_update(const char *id, const char *text);
 /* A remote card is staged separately from camera pixels. Publish only after
  * the complete download succeeds; failure keeps the last completed card. */

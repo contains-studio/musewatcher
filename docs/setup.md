@@ -118,13 +118,16 @@ Check that the firmware boots without repeated resets and that the app can reach
 | Tap the idle home | Pet Muse; the dressed character changes expression, raises its arms, and hops. |
 | Hold the home screen for about 0.4 seconds | Record while held; release to send. Dragging away or leaving home cancels. |
 | Hold the physical wheel | Push to talk. |
-| Turn the wheel during a reply | Read backward or forward; manual reading pauses automatic paging. Press to finish. |
+| Press the wheel once while thinking | Cancel the current upload or response wait and return home, even with the mic off. |
+| Turn the wheel during a reply | Read backward or forward; manual reading pauses automatic paging. Press to finish reading, or to cancel if still thinking. |
 | Turn the wheel at idle | Browse the latest card, last reply, or return to Muse. Press to open the selection. |
 | Swipe left / right | Open Settings / return home. |
 | Double-tap home or double-click the wheel | Open camera preview; repeat the camera action to freeze a frame. |
 | Touch a sleeping screen | Wake it; the waking touch does not also record or pet. |
 
 The idle home keeps the character low on the display. Replies appear above a smaller Muse and page automatically whether sound is on or off. The latest completed card and last reply are retained in RAM until restart. Settings → Sound controls the microphone and speaker; microphone mute cancels active recording and pauses queued voice notes.
+
+The **Press wheel to cancel** hint appears only while thinking. Use a short press, not a hold. Cancellation discards the active note instead of retrying it and closes the Watcher's response streams; Muse may still finish work it already received in the app. Other saved notes remain queued. A new hold starts a new recording normally.
 
 In camera preview, choose **Take photo**; in review, choose **Send photo**, **Retake**, or **×** to discard. Wheel rotation highlights an action and a press selects it. Turning alone never sends a photo. A failed send retains the frozen JPEG for an explicit retry. Camera images are separate messages, not automatic attachments to voice recordings. The camera uses the Watcher's existing Himax firmware; this build does not replace that firmware.
 
