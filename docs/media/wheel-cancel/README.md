@@ -1,6 +1,12 @@
 # Wheel cancellation evidence
 
-These captures use the production LVGL UI in the desktop simulator at the
+`device-thinking.png` and `device-cancelled.png` are screenshots from the
+flashed SenseCAP Watcher, before and after cancellation. The thinking state
+and wheel click were injected over USB; this was not a live Muse request or
+a physical button test. USB screenshot transfer pauses the UI and wheel
+handling for about 40 seconds, so do not capture while testing the button.
+
+The simulator captures below use the production LVGL UI at the
 Watcher's 412 × 412 resolution. The waiting state, reply text, voice service,
 and wheel input are simulated. No voice message or photo was sent to Muse.
 
