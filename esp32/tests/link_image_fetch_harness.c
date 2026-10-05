@@ -26,6 +26,8 @@
 #include <string.h>
 
 #include "esp_http_client.h"
+#include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -58,6 +60,12 @@ static void fail_at(const char *file, int line, const char *fmt, ...) {
 // ---- Clock -------------------------------------------------------------------
 
 static int64_t g_now_us;
+static size_t g_internal_free = 200000, g_internal_block = 100000;
+static size_t g_psram_block = 3000000;
+static size_t g_connected_free;
+static bool g_task_fail;
+static int g_creates, g_deletes, g_caps_creates, g_caps_deletes;
+static unsigned g_task_caps;
 
 int64_t esp_timer_get_time(void) {
     return g_now_us;
@@ -92,6 +100,13 @@ struct fake_esp_http_client {
 
 static void reset_server(void) {
     memset(g_responses, 0, sizeof(g_responses));
+    g_internal_free = 200000;
+    g_internal_block = 100000;
+    g_psram_block = 3000000;
+    g_connected_free = 0;
+    g_task_fail = false;
+    g_creates = g_deletes = g_caps_creates = g_caps_deletes = 0;
+    g_task_caps = 0;
     g_response_count = 0;
     g_opens = 0;
     g_now_us = 1000000;
@@ -132,6 +147,7 @@ esp_err_t esp_http_client_open(esp_http_client_handle_t c, int write_len) {
     CHECK(!c->open, "open while open");
     CHECK(g_opens < g_response_count, "unscripted open #%d of %s", g_opens + 1, c->url);
     c->resp = &g_responses[g_opens++];
+    if (g_connected_free) g_internal_free = g_connected_free;
     c->sent = 0;
     c->open = true;
     spend(c, c->resp->open_us);
@@ -220,6 +236,8 @@ BaseType_t xTaskCreate(TaskFunction_t task, const char *name, unsigned stack_dep
     (void)name;
     (void)priority;
     (void)out_handle;
+    g_creates++;
+    if (g_task_fail) return 0;
     g_stack = stack_depth;
     task(params);   // runs to completion; vTaskDelete returns
     return pdPASS;
@@ -227,6 +245,26 @@ BaseType_t xTaskCreate(TaskFunction_t task, const char *name, unsigned stack_dep
 
 void vTaskDelete(TaskHandle_t task) {
     (void)task;
+    g_deletes++;
+}
+
+BaseType_t xTaskCreateWithCaps(TaskFunction_t task, const char *name, unsigned stack_depth,
+                              void *params, unsigned priority, TaskHandle_t *out_handle,
+                              unsigned caps) {
+    (void)name;
+    (void)priority;
+    (void)out_handle;
+    g_caps_creates++;
+    g_task_caps = caps;
+    if (g_task_fail) return 0;
+    g_stack = stack_depth;
+    task(params);
+    return pdPASS;
+}
+
+void vTaskDeleteWithCaps(TaskHandle_t task) {
+    (void)task;
+    g_caps_deletes++;
 }
 
 void vTaskDelay(int ticks) {
@@ -234,18 +272,15 @@ void vTaskDelay(int ticks) {
 }
 
 size_t heap_caps_get_free_size(int caps) {
-    (void)caps;
-    return 200000;
+    return (caps & MALLOC_CAP_SPIRAM) ? 3000000 : g_internal_free;
 }
 
 size_t heap_caps_get_minimum_free_size(int caps) {
-    (void)caps;
-    return 200000;
+    return (caps & MALLOC_CAP_SPIRAM) ? 3000000 : g_internal_free;
 }
 
 size_t heap_caps_get_largest_free_block(int caps) {
-    (void)caps;
-    return 100000;
+    return (caps & MALLOC_CAP_SPIRAM) ? g_psram_block : g_internal_block;
 }
 
 void *heap_caps_malloc(size_t size, int caps) {
@@ -312,6 +347,14 @@ static void fetch(const char *url) {
     CHECK(image_fetch_start(url, 0, on_done, NULL, &code, &message),
           "start %s refused: %s", url, message ? message : "");
     CHECK(g_done, "download did not finish");
+#if TEST_EXTERNAL_STACK
+    CHECK(g_creates == 0 && g_deletes == 0, "external task used internal task API");
+    CHECK(g_caps_creates == g_caps_deletes, "external task cleanup missing");
+    CHECK(g_task_caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT), "wrong stack caps");
+#else
+    CHECK(g_caps_creates == 0 && g_caps_deletes == 0, "internal task used caps API");
+    CHECK(g_creates == g_deletes, "internal task cleanup missing");
+#endif
 }
 
 static void expect_failure(const char *message) {
@@ -391,7 +434,86 @@ static void test_slow_redirect_chain_stops_at_the_limit(void) {
     CHECK(g_max_timeout_overrun_us == 0, "an open could block past the deadline");
 }
 
+static void expect_refused(void) {
+    const char *code = NULL, *message = NULL;
+    g_done = false;
+    CHECK(!image_fetch_start("https://host/img", 0, on_done, NULL, &code, &message),
+          "expected memory refusal");
+    CHECK(code && strcmp(code, "out_of_memory") == 0, "wrong refusal code");
+    CHECK(!g_done && g_opens == 0, "refused request must not connect or complete");
+}
+
+static void test_watcher_memory_pressure(void) {
+    reset_server();
+    // Measured on the live Watcher when the weather card was refused.
+    g_internal_free = 19 * 1024;
+    g_internal_block = 12 * 1024;
+#if TEST_EXTERNAL_STACK
+    add_response((response_t){.status = 200, .body_len = 6 * ROW_BYTES});
+    fetch("https://host/img");
+    CHECK(g_result.ok && g_rows_drawn == 6, "weather card failed under measured pressure");
+#else
+    expect_refused();
+    CHECK(g_creates == 0, "internal stack profile must retain its memory guard");
+#endif
+}
+
+static void test_memory_guards_and_recovery(void) {
+    reset_server();
+    g_internal_free = 12 * 1024 - 1;
+    expect_refused();
+    CHECK(g_creates + g_caps_creates == 0, "low reserve must not start a task");
+
+#if TEST_EXTERNAL_STACK
+    reset_server();
+    // WithCaps self-deletion needs a contiguous internal cleanup-task stack.
+    g_internal_block = 1024;
+    expect_refused();
+    CHECK(g_caps_creates == 0, "fragmented internal reserve must not start a task");
+    reset_server();
+    g_psram_block = 8192 - 1;
+    expect_refused();
+    CHECK(g_creates + g_caps_creates == 0, "fragmented PSRAM must not start a task");
+#else
+    reset_server();
+    g_internal_block = 6144;
+    expect_refused();
+    CHECK(g_creates == 0, "fragmented internal memory must not start a task");
+#endif
+    // A refusal must release the busy flag.
+    reset_server();
+    add_response((response_t){.status = 200, .body_len = ROW_BYTES});
+    fetch("https://host/img");
+    CHECK(g_result.ok, "request after memory refusal failed");
+}
+
+static void test_task_allocation_failure_releases_busy(void) {
+    reset_server();
+    g_task_fail = true;
+    expect_refused();
+    CHECK(g_creates + g_caps_creates == 1, "expected one task allocation attempt");
+    CHECK(g_deletes + g_caps_deletes == 0, "failed task must not be deleted");
+    reset_server();
+    add_response((response_t){.status = 200, .body_len = ROW_BYTES});
+    fetch("https://host/img");
+    CHECK(g_result.ok, "request after task allocation failure failed");
+}
+
+static void test_runtime_memory_floor(void) {
+    reset_server();
+    g_connected_free = 3 * 1024 - 1;
+    add_response((response_t){.status = 200, .body_len = ROW_BYTES});
+    fetch("https://host/img");
+    CHECK(!g_result.ok && strcmp(g_result.code, "out_of_memory") == 0,
+          "runtime memory floor must still abort the download");
+    CHECK(g_rows_drawn == 0, "must not draw after hitting memory floor");
+}
+
 int main(void) {
+    test_watcher_memory_pressure();
+    test_memory_guards_and_recovery();
+    test_task_allocation_failure_releases_busy();
+    test_runtime_memory_floor();
     test_http_redirect_to_https_is_refused();
     test_https_redirect_to_http_is_refused();
     test_scheme_check_ignores_case();

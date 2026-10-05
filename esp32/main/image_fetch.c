@@ -38,6 +38,18 @@
 
 static const char *TAG = "link.image";
 
+// S3 full-UI builds can keep the download stack in PSRAM. Require XIP so
+// flash/cache operations do not make an external stack inaccessible.
+#if CONFIG_HOMEHUB_LED_BACKEND_MUSE && CONFIG_SPIRAM \
+    && CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM && CONFIG_SPIRAM_XIP_FROM_PSRAM
+#include "freertos/idf_additions.h"
+#define FETCH_EXTERNAL_STACK 1
+#define FETCH_STACK_CAPS (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#else
+#define FETCH_EXTERNAL_STACK 0
+#define FETCH_STACK_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#endif
+
 // The download task's stack. The TLS handshake runs on it for HTTPS.
 #define FETCH_STACK_BYTES   6144
 #define FETCH_TLS_STACK     8192
@@ -392,7 +404,11 @@ static void fetch_task(void *arg) {
     free(f->url);
     free(f);
     atomic_store(&s_busy, false);
+#if FETCH_EXTERNAL_STACK
+    vTaskDeleteWithCaps(NULL);
+#else
     vTaskDelete(NULL);
+#endif
 }
 
 bool image_fetch_start(const char *url, int row, image_fetch_done_cb done,
@@ -422,10 +438,16 @@ bool image_fetch_start(const char *url, int row, image_fetch_done_cb done,
     }
 
     size_t stack = https ? FETCH_TLS_STACK : FETCH_STACK_BYTES;
-    size_t need = stack + FETCH_RESERVE_BYTES
+    // Only charge the stack against internal memory when it is allocated
+    // there. The reserve still covers the internal TCB and cleanup task.
+    size_t need = (FETCH_EXTERNAL_STACK ? 0 : stack) + FETCH_RESERVE_BYTES
                 + (https ? FETCH_TLS_BYTES : FETCH_HTTP_BYTES);
     size_t block = heap_caps_get_largest_free_block(BYTE_CAPS);
-    if (internal_free() < need || block < stack
+    size_t stack_block = heap_caps_get_largest_free_block(FETCH_STACK_CAPS);
+    // WithCaps self-deletion creates an internal cleanup task. Keep a
+    // contiguous reserve for it even when our worker stack is external.
+    size_t internal_block = FETCH_EXTERNAL_STACK ? FETCH_RESERVE_BYTES : stack;
+    if (internal_free() < need || stack_block < stack || block < internal_block
         || (https && block < FETCH_TLS_BLOCK)) {
         log_memory("image download refused");
         atomic_store(&s_busy, false);
@@ -450,7 +472,13 @@ bool image_fetch_start(const char *url, int row, image_fetch_done_cb done,
     f->user = user;
     f->width = width;
     f->height = height;
-    if (xTaskCreate(fetch_task, "image", stack, f, 4, NULL) != pdPASS) {
+#if FETCH_EXTERNAL_STACK
+    BaseType_t created = xTaskCreateWithCaps(fetch_task, "image", stack, f, 4, NULL,
+                                            FETCH_STACK_CAPS);
+#else
+    BaseType_t created = xTaskCreate(fetch_task, "image", stack, f, 4, NULL);
+#endif
+    if (created != pdPASS) {
         free(f->url);
         free(f);
         atomic_store(&s_busy, false);

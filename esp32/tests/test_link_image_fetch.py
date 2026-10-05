@@ -63,7 +63,32 @@ def _sanitizer_flags(cc: list[str], tmp: Path) -> list[str]:
 
 
 class LinkImageFetchHarnessTest(unittest.TestCase):
-    def test_redirect_scheme_lock_and_deadline(self) -> None:
+    def test_internal_stack(self) -> None:
+        self.run_harness([])
+
+    def test_watcher_external_stack(self) -> None:
+        self.run_harness([
+            "-DCONFIG_HOMEHUB_LED_BACKEND_MUSE=1", "-DCONFIG_SPIRAM=1",
+            "-DCONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=1",
+            "-DCONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=1",
+            "-DCONFIG_SPIRAM_XIP_FROM_PSRAM=1", "-DTEST_EXTERNAL_STACK=1",
+        ])
+
+    def test_muse_without_external_stack_support(self) -> None:
+        self.run_harness([
+            "-DCONFIG_HOMEHUB_LED_BACKEND_MUSE=1", "-DCONFIG_SPIRAM=1",
+            "-DCONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=1",
+            "-DCONFIG_SPIRAM_XIP_FROM_PSRAM=1",
+        ])
+
+    def test_muse_without_psram_xip(self) -> None:
+        self.run_harness([
+            "-DCONFIG_HOMEHUB_LED_BACKEND_MUSE=1", "-DCONFIG_SPIRAM=1",
+            "-DCONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=1",
+            "-DCONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=1",
+        ])
+
+    def run_harness(self, config: list[str]) -> None:
         cc = _cc_command()
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -81,6 +106,7 @@ class LinkImageFetchHarnessTest(unittest.TestCase):
                 "-g",
                 "-O1",
                 *sanitizer_flags,
+                *config,
                 "-DLINK_FAKE_CUSTOM_TASKS",
                 "-DLINK_FAKE_CUSTOM_HEAP_CAPS",
                 "-I",
